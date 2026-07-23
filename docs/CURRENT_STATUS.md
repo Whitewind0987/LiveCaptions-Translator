@@ -2,7 +2,7 @@
 
 ## Repository state
 
-- Branch: `feature/optional-live-captions`
+- Branch: `feature/win10-asr-backend`
 - Baseline commit: `7a6fe4a5b294dacc4aa1b3666981d6c00dbcd183`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
 - Completed stages:

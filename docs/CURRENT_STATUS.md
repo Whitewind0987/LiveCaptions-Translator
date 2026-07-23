@@ -36,12 +36,20 @@ the application can start and remain usable on Windows 10.
 
 ### Changes
 
-- `LiveCaptionsHandler.TryLaunchLiveCaptions()` replaces the throwing
-  `LaunchLiveCaptions()` in `Translator` static initialization. It returns a
-  structured result instead of throwing on failure.
+- `LiveCaptionsHandler.TryInitializeLiveCaptions()` protects the complete Live
+  Captions setup: process launch, window discovery, window repair when needed,
+  and hiding the window. It returns a structured result instead of throwing on
+  failure.
+- If complete initialization fails after starting a process, the handler tries
+  to terminate only the process started by that attempt. Cleanup failures are
+  included in the returned diagnostic and do not escape into the WPF process.
+- Initial startup and the single controlled restart use the same complete
+  initialization operation.
 - `Translator.CaptionSourceUnavailable` flag distinguishes an unavailable
   caption source (e.g. Win10 without LiveCaptions.exe) from a window that was
-  previously available and was unexpectedly closed.
+  previously available and was unexpectedly closed. The property is externally
+  read-only, and `Translator.CaptionSourceFailureReason` retains the most recent
+  initialization failure reason.
 - `Translator` static constructor no longer crashes when LiveCaptions.exe is
   absent. It records the unavailable state and initializes settings and caption
   state normally.

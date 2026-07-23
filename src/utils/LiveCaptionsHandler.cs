@@ -12,45 +12,98 @@ namespace LiveCaptionsTranslator.utils
 
         private static AutomationElement? captionsTextBlock = null;
 
-        public static (bool Success, AutomationElement? Window, string? ErrorMessage) TryLaunchLiveCaptions()
+        public static (bool Success, AutomationElement? Window, string? ErrorMessage) TryInitializeLiveCaptions()
         {
+            Process? startedProcess = null;
+
             try
             {
                 KillAllProcessesByPName(PROCESS_NAME);
-                var process = Process.Start(PROCESS_NAME);
+                startedProcess = Process.Start(PROCESS_NAME);
+                if (startedProcess == null)
+                    return CreateInitializationFailure(null, "Failed to start LiveCaptions process.");
 
                 AutomationElement? window = null;
                 for (int attemptCount = 0;
                      window == null || window.Current.ClassName.CompareTo("LiveCaptionsDesktopWindow") != 0;
                      attemptCount++)
                 {
-                    window = FindWindowByPId(process.Id);
+                    window = FindWindowByPId(startedProcess.Id);
                     if (attemptCount > 10000)
-                        return (false, null, "Failed to find LiveCaptions window after launching.");
+                        return CreateInitializationFailure(
+                            startedProcess, "Failed to find LiveCaptions window after launching.");
                 }
 
+                FixLiveCaptions(window);
+                HideLiveCaptions(window);
                 return (true, window, null);
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == 2)
             {
-                return (false, null, "LiveCaptions.exe is not available on this system.");
+                return CreateInitializationFailure(
+                    startedProcess, "LiveCaptions.exe is not available on this system.");
             }
-            catch (Win32Exception)
+            catch (Win32Exception ex)
             {
-                return (false, null, "Failed to start LiveCaptions process.");
+                return CreateInitializationFailure(
+                    startedProcess, $"Failed to initialize LiveCaptions: {ex.Message}");
             }
             catch (Exception ex)
             {
-                return (false, null, $"Failed to launch LiveCaptions: {ex.Message}");
+                return CreateInitializationFailure(
+                    startedProcess, $"Failed to initialize LiveCaptions: {ex.Message}");
+            }
+            finally
+            {
+                try
+                {
+                    startedProcess?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Failed to dispose LiveCaptions process handle: {ex.Message}");
+                }
             }
         }
 
         public static AutomationElement LaunchLiveCaptions()
         {
-            var (success, window, errorMessage) = TryLaunchLiveCaptions();
+            var (success, window, errorMessage) = TryInitializeLiveCaptions();
             if (!success)
-                throw new Exception(errorMessage ?? "Failed to launch LiveCaptions!");
+                throw new Exception(errorMessage ?? "Failed to initialize LiveCaptions!");
             return window!;
+        }
+
+        private static (bool Success, AutomationElement? Window, string ErrorMessage)
+            CreateInitializationFailure(Process? startedProcess, string errorMessage)
+        {
+            var cleanupError = TryTerminateStartedProcess(startedProcess);
+            if (!string.IsNullOrEmpty(cleanupError))
+                errorMessage = $"{errorMessage} {cleanupError}";
+
+            return (false, null, errorMessage);
+        }
+
+        private static string? TryTerminateStartedProcess(Process? startedProcess)
+        {
+            if (startedProcess == null)
+                return null;
+
+            try
+            {
+                if (!startedProcess.HasExited)
+                {
+                    startedProcess.Kill();
+                    if (!startedProcess.WaitForExit(2000))
+                        return "Cleanup timed out while terminating the started LiveCaptions process.";
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"Cleanup failed for the started LiveCaptions process: {ex.Message}";
+            }
+
+            return null;
         }
 
         public static void KillLiveCaptions(AutomationElement window)

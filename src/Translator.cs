@@ -28,7 +28,8 @@ namespace LiveCaptionsTranslator
 
         public static bool LogOnlyFlag { get; set; } = false;
         public static bool FirstUseFlag { get; set; } = false;
-        public static bool CaptionSourceUnavailable { get; set; } = false;
+        public static bool CaptionSourceUnavailable { get; private set; } = false;
+        public static string? CaptionSourceFailureReason { get; private set; } = null;
 
         public static event Action? TranslationLogged;
 
@@ -49,19 +50,7 @@ namespace LiveCaptionsTranslator
 
         static Translator()
         {
-            var (success, liveCaptionsWindow, errorMessage) = LiveCaptionsHandler.TryLaunchLiveCaptions();
-
-            if (success && liveCaptionsWindow != null)
-            {
-                window = liveCaptionsWindow;
-                LiveCaptionsHandler.FixLiveCaptions(liveCaptionsWindow);
-                LiveCaptionsHandler.HideLiveCaptions(liveCaptionsWindow);
-            }
-            else
-            {
-                CaptionSourceUnavailable = true;
-                window = null;
-            }
+            TryInitializeCaptionSource();
 
             if (!File.Exists(Path.Combine(Directory.GetCurrentDirectory(), models.Setting.FILENAME)))
                 FirstUseFlag = true;
@@ -200,15 +189,10 @@ namespace LiveCaptionsTranslator
 
                     Thread.Sleep(2000);
                     Caption.DisplayTranslatedCaption = "[WARNING] LiveCaptions was unexpectedly closed, restarting...";
-                    var (success, newWindow, errorMessage) = LiveCaptionsHandler.TryLaunchLiveCaptions();
-                    if (success && newWindow != null)
-                    {
-                        Window = newWindow;
+                    if (TryInitializeCaptionSource())
                         Caption.DisplayTranslatedCaption = "";
-                    }
                     else
                     {
-                        CaptionSourceUnavailable = true;
                         ApplyCaptionSourceUnavailableWarning();
                     }
                 }
@@ -232,6 +216,25 @@ namespace LiveCaptionsTranslator
 
                 Thread.Sleep(40);
             }
+        }
+
+        private static bool TryInitializeCaptionSource()
+        {
+            var (success, liveCaptionsWindow, errorMessage) =
+                LiveCaptionsHandler.TryInitializeLiveCaptions();
+
+            if (success && liveCaptionsWindow != null)
+            {
+                Window = liveCaptionsWindow;
+                CaptionSourceUnavailable = false;
+                CaptionSourceFailureReason = null;
+                return true;
+            }
+
+            Window = null;
+            CaptionSourceUnavailable = true;
+            CaptionSourceFailureReason = errorMessage ?? "Live Captions initialization failed without a reason.";
+            return false;
         }
 
         public static async Task DisplayLoop()

@@ -10,9 +10,9 @@
   - Stage 1 optional Windows Live Captions startup, verified on Windows 10
   - Stage 2A source-independent contracts and event-ordering core
   - Stage 2B Windows Live Captions source adapter and production integration
-- Current status: Stage 2 implementation is complete pending final manual
-  runtime verification
-- Next stage after Stage 2 manual acceptance: Stage 3
+- Current status: Stage 2 is complete and accepted on Windows 10; Windows 11
+  runtime verification remains pending
+- Next stage: Stage 3, only after explicit approval
 
 ## Environment
 
@@ -141,8 +141,13 @@ raw snapshots as `Partial` events only. It deliberately emits no `Committed` or
 when text enters the translation queue. Translation-version rejection remains a
 later-stage responsibility.
 
-Stage 1 remains complete on Windows 10. Windows 11 runtime behavior remains
-unverified and no Windows 11 checks are recorded as passed. Stage 2B Windows 10
-and Windows 11 manual runtime verification remains pending after this
-pre-acceptance hardening; Stage 3 has not begun.
+Stage 1 remains complete on Windows 10. Stage 2B manual runtime acceptance
+passed on Windows 10 on 2026-07-23, including unavailable-source startup,
+pause/resume warning restoration, two-minute stability, seven process checks,
+no repeated Live Captions launch attempt, and clean process shutdown. Stage 2
+is complete and accepted on Windows 10.
+
+Windows 11 runtime behavior remains unverified and no Windows 11 checks are
+recorded as passed. Stage 3 has not begun and is the next stage only after
+explicit approval.
 

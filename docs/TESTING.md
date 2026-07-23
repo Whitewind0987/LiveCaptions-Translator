@@ -168,21 +168,40 @@ two-second wait.
 
 ## Stage 2B Windows 10 manual checklist
 
-All checks below are **pending** for the Stage 2B build. Existing Stage 1 Windows
-10 acceptance remains valid but is not treated as Stage 2B verification.
+Manual test date: **2026-07-23**
 
-- Application opens without `TypeInitializationException`: **pending**
-- Generic unavailable-source warning appears: **pending**
-- Settings opens: **pending**
-- History opens: **pending**
-- Overlay opens and closes: **pending**
-- Pause displays `[Paused]`: **pending**
-- Resume restores `[WARNING] No caption source is available.`: **pending**
-- Application remains open for at least two minutes: **pending**
-- No `LiveCaptions` process exists on Windows 10: **pending**
-- No repeated Live Captions launch attempts occur: **pending**
-- Application exits cleanly: **pending**
-- No `LiveCaptionsTranslator` process remains: **pending**
+All Stage 2B Windows 10 checks passed:
+
+- Application opens without `TypeInitializationException`: **passed**
+- Generic unavailable-source warning appears: **passed**
+- Settings opens: **passed**
+- History opens: **passed**
+- Overlay opens and closes: **passed**
+- Pause displays `[Paused]`: **passed**
+- Resume immediately restores
+  `[WARNING] No caption source is available.`: **passed**
+- Application remains open and stable for at least two minutes: **passed**
+- No `LiveCaptions` process exists on Windows 10: **passed**
+- No repeated Live Captions launch attempts occur: **passed**
+- Application exits cleanly: **passed**
+- No `LiveCaptionsTranslator` process remains after exit: **passed**
+
+Seven process checks were recorded at 20-second intervals while the application
+remained open:
+
+| Time | `LiveCaptions` | `LiveCaptionsTranslator` |
+|---|---:|---:|
+| 13:28:04 | 0 | 1 |
+| 13:28:24 | 0 | 1 |
+| 13:28:44 | 0 | 1 |
+| 13:29:04 | 0 | 1 |
+| 13:29:24 | 0 | 1 |
+| 13:29:44 | 0 | 1 |
+| 13:30:04 | 0 | 1 |
+
+After normal application exit, both `LiveCaptions` and
+`LiveCaptionsTranslator` process counts were 0. Stage 2B is accepted on Windows
+10.
 
 ## Stage 2B Windows 11 manual checklist
 

@@ -160,6 +160,26 @@ It also permits a subscriber to call `StopAsync` synchronously without waiting
 on its own publication; the invalidated generation prevents any later handler,
 frame, or stale callback from being published after that stop completes.
 
+The native WASAPI callback never executes `FrameProduced` subscribers. After
+copying callback-owned bytes, serialized normalization, frame assembly, and the
+normal bounded PCM-buffer write, the callback only attempts to enqueue a
+lightweight notification containing the existing immutable frame reference.
+A tracked single-reader managed dispatcher publishes those notifications in
+sequence through a separate bounded channel with capacity 32; a full
+notification channel drops the newest notification without blocking capture or
+duplicating the five-second PCM payload buffer. The PCM frame buffer remains the
+authoritative future IPC-consumer path.
+
+Each dispatcher is created paused for one capture generation. Callbacks during
+`Starting` may fill only that bounded notification channel; activation happens
+after the `Running` status has been published and `StartAsync` has released its
+lifecycle gate. Stop or fault invalidates and completes the dispatcher, rejects
+queued old-generation notifications, and normally joins its tracked runner. A
+subscriber synchronously stopping from the dispatcher flow does not join its
+own current publication; native capture cleanup can therefore join the already-
+returned WASAPI thread, while generation checks prevent another handler or
+frame notification after the synchronous stop returns.
+
 The first normalization failure or unexpected native stop reserves one terminal
 cleanup operation. That stored operation completes the frame buffer, rejects
 later callbacks, waits for active processing/publication where required, stops
@@ -169,6 +189,12 @@ failure with every cleanup failure, and publishes exactly one terminal state.
 owned fields first and independently attempts stop, both handler detachments,
 capture disposal, and endpoint disposal, so one cleanup error cannot suppress a
 later action or its diagnostic.
+
+Service disposal independently attempts stop, endpoint-provider disposal,
+dispatcher completion/disposal, frame-buffer completion/disposal, and final
+lifecycle-gate disposal. Failures are aggregated after every phase has been
+attempted, and waiting frame consumers are released even if another disposal
+phase fails.
 
 Ordinary application startup deliberately does not construct or start
 `AudioCaptureService`. Stage 3 exposes the capture foundation and a separate

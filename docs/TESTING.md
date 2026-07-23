@@ -233,7 +233,7 @@ dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
 
 Current result:
 
-- 182 passed
+- 193 passed
 - 0 failed
 - 0 skipped
 - all existing 100 Stage 2 tests are preserved
@@ -267,6 +267,22 @@ regressions verify nonzero exit for unexpected `Unavailable`/`Faulted` closure,
 zero exit for requested bounded or Ctrl+C-equivalent cancellation, WAV
 finalization on failure, and final diagnostics being sampled only after service
 stop/cleanup completes.
+
+Native-thread hardening regressions use a deterministic fake runtime with a
+dedicated callback thread whose disposal joins that thread. They verify that
+`FrameProduced` runs on the managed dispatcher instead, a subscriber can call
+synchronous `StopAsync`, the callback thread exits, runtime stop/disposal each
+occur once, later handlers are suppressed, and no event follows stop. A second
+mode emits data before runtime `StartAsync` returns and verifies that frame
+publication waits for `Running` status publication and lifecycle-gate release.
+
+Additional dispatcher tests cover ordered sequences, the fixed 32-notification
+capacity and nonblocking overflow, stale queued-notification discard, terminal
+status ordering, clean generation replacement after restart, and observed
+dispatcher faults becoming typed service failures. Disposal regressions verify
+that endpoint-provider, dispatcher, frame-buffer, and stop cleanup phases do not
+skip one another, multiple failures remain diagnosable, repeated disposal stays
+safe, and waiting frame consumers are released despite another phase failing.
 
 All audio samples are generated in memory and all service tests use fake
 endpoint providers and capture runtimes. Automated tests do not enumerate or

@@ -12,6 +12,8 @@ namespace LiveCaptionsTranslator.audio
         private readonly object callbackGate = new();
         private readonly CallbackPublicationBarrier callbackBarrier = new();
         private readonly Action? beforeCallbackProcessing;
+        private readonly Action? beforeFrameDispatch;
+        private readonly Action? beforeFrameBufferDispose;
         private readonly AsyncLocal<TerminalCleanupOperation?> terminalStatusPublication = new();
         private readonly AsyncLocal<StatusPublicationContext?> currentStatusPublication = new();
 
@@ -20,6 +22,8 @@ namespace LiveCaptionsTranslator.audio
         private StreamingAudioNormalizer? normalizer;
         private AudioFrameAssembler? assembler;
         private BoundedAudioFrameBuffer frameBuffer = new();
+        private FramePublicationDispatcher? publicationDispatcher;
+        private readonly List<FramePublicationDispatcher> retiredDispatchers = [];
         private EventHandler<AudioCaptureData>? dataHandler;
         private EventHandler<AudioRuntimeStopped>? stoppedHandler;
         private Guid? sessionId;
@@ -51,10 +55,22 @@ namespace LiveCaptionsTranslator.audio
             IAudioEndpointProvider endpointProvider,
             IAudioCaptureRuntimeFactory runtimeFactory,
             Action? beforeCallbackProcessing)
+            : this(endpointProvider, runtimeFactory, beforeCallbackProcessing, null, null)
+        {
+        }
+
+        internal AudioCaptureService(
+            IAudioEndpointProvider endpointProvider,
+            IAudioCaptureRuntimeFactory runtimeFactory,
+            Action? beforeCallbackProcessing,
+            Action? beforeFrameDispatch,
+            Action? beforeFrameBufferDispose)
         {
             this.endpointProvider = endpointProvider ?? throw new ArgumentNullException(nameof(endpointProvider));
             this.runtimeFactory = runtimeFactory ?? throw new ArgumentNullException(nameof(runtimeFactory));
             this.beforeCallbackProcessing = beforeCallbackProcessing;
+            this.beforeFrameDispatch = beforeFrameDispatch;
+            this.beforeFrameBufferDispose = beforeFrameBufferDispose;
         }
 
         public AudioCaptureState State { get { lock (stateLock) return state; } }
@@ -93,6 +109,31 @@ namespace LiveCaptionsTranslator.audio
         public event EventHandler<AudioCaptureStatus>? StatusChanged;
         public event EventHandler<NormalizedAudioFrame>? FrameProduced;
 
+        internal int FrameNotificationCapacity => FramePublicationDispatcher.DefaultCapacity;
+        internal int FrameNotificationsQueued
+        {
+            get { lock (stateLock) return publicationDispatcher?.QueuedCount ?? 0; }
+        }
+        internal int MaximumFrameNotificationsQueued
+        {
+            get { lock (stateLock) return publicationDispatcher?.MaximumQueuedCount ?? 0; }
+        }
+        internal long FrameNotificationsDropped
+        {
+            get { lock (stateLock) return publicationDispatcher?.DroppedCount ?? 0; }
+        }
+        internal bool PublicationDispatchersCompleted
+        {
+            get
+            {
+                lock (stateLock)
+                {
+                    return publicationDispatcher == null &&
+                        retiredDispatchers.All(dispatcher => dispatcher.Completion.IsCompleted);
+                }
+            }
+        }
+
         public async Task<AudioCaptureStartResult> StartAsync(
             string? savedEndpointId,
             CancellationToken cancellationToken = default)
@@ -113,6 +154,16 @@ namespace LiveCaptionsTranslator.audio
             }
 
             PublishStatuses(statuses);
+            FramePublicationDispatcher? dispatcherToActivate = null;
+            if (result.Success)
+            {
+                lock (stateLock)
+                {
+                    if (state == AudioCaptureState.Running && sessionId == result.SessionId)
+                        dispatcherToActivate = publicationDispatcher;
+                }
+            }
+            dispatcherToActivate?.Activate();
             return result;
         }
 
@@ -219,6 +270,17 @@ namespace LiveCaptionsTranslator.audio
             var newAssembler = new AudioFrameAssembler();
             newAssembler.StartSession(newSessionId);
             var newBuffer = new BoundedAudioFrameBuffer();
+            var newDispatcher = new FramePublicationDispatcher(
+                newSessionId,
+                generation,
+                PublishFrame,
+                ex => ScheduleTerminalCleanup(
+                    newRuntime,
+                    newSessionId,
+                    generation,
+                    AudioCaptureState.Faulted,
+                    $"Frame notification dispatcher failed: {DescribeException(ex)}"),
+                beforeFrameDispatch);
             BoundedAudioFrameBuffer oldBuffer;
             lock (stateLock)
             {
@@ -227,6 +289,7 @@ namespace LiveCaptionsTranslator.audio
                 normalizer = newNormalizer;
                 assembler = newAssembler;
                 frameBuffer = newBuffer;
+                publicationDispatcher = newDispatcher;
                 dataHandler = onData;
                 stoppedHandler = onStopped;
                 sessionId = newSessionId;
@@ -323,6 +386,7 @@ namespace LiveCaptionsTranslator.audio
                 IReadOnlyList<NormalizedAudioFrame> frames;
                 List<NormalizedAudioFrame> acceptedFrames = [];
                 BoundedAudioFrameBuffer currentBuffer;
+                FramePublicationDispatcher currentDispatcher;
                 lock (callbackGate)
                 {
                     beforeCallbackProcessing?.Invoke();
@@ -338,6 +402,7 @@ namespace LiveCaptionsTranslator.audio
                         currentNormalizer = normalizer;
                         currentAssembler = assembler;
                         currentBuffer = frameBuffer;
+                        currentDispatcher = publicationDispatcher!;
                     }
 
                     var normalized = currentNormalizer!.Process(data.Bytes.Span);
@@ -363,11 +428,10 @@ namespace LiveCaptionsTranslator.audio
                 }
 
                 foreach (var frame in acceptedFrames)
-                {
-                    if (!callbackBarrier.CanPublish(lease))
-                        break;
-                    PublishFrame(lease, frame);
-                }
+                    currentDispatcher.TryEnqueue(new FramePublicationNotification(
+                        eventSessionId,
+                        generation,
+                        frame));
             }
             catch (Exception ex)
             {
@@ -412,6 +476,7 @@ namespace LiveCaptionsTranslator.audio
         {
             TerminalCleanupOperation operation;
             BoundedAudioFrameBuffer buffer;
+            FramePublicationDispatcher? dispatcher;
             lock (stateLock)
             {
                 if (!acceptCallbacks || !ReferenceEquals(runtime, eventRuntime) ||
@@ -425,9 +490,11 @@ namespace LiveCaptionsTranslator.audio
                 operation = new TerminalCleanupOperation();
                 terminalCleanup = operation;
                 buffer = frameBuffer;
+                dispatcher = publicationDispatcher;
             }
 
             callbackBarrier.Invalidate(generation);
+            dispatcher?.Invalidate();
             buffer.Complete();
             operation.Runner = RunTerminalCleanupAsync(operation, generation, terminalState, reason);
         }
@@ -484,6 +551,7 @@ namespace LiveCaptionsTranslator.audio
             EventHandler<AudioCaptureData>? oldDataHandler;
             EventHandler<AudioRuntimeStopped>? oldStoppedHandler;
             BoundedAudioFrameBuffer oldBuffer;
+            FramePublicationDispatcher? oldDispatcher;
             long oldGeneration;
             lock (stateLock)
             {
@@ -492,13 +560,24 @@ namespace LiveCaptionsTranslator.audio
                 oldDataHandler = dataHandler;
                 oldStoppedHandler = stoppedHandler;
                 oldBuffer = frameBuffer;
+                oldDispatcher = publicationDispatcher;
                 oldGeneration = generation ?? callbackGeneration;
             }
 
             callbackBarrier.Invalidate(oldGeneration);
+            oldDispatcher?.Invalidate();
             await callbackBarrier.WaitForDrainAsync(oldGeneration).ConfigureAwait(false);
             var failures = new List<string>();
             AddFailure(failures, initialFailure);
+
+            if (oldDispatcher != null)
+            {
+                try { AddFailure(failures, await oldDispatcher.StopAsync().ConfigureAwait(false)); }
+                catch (Exception ex)
+                {
+                    failures.Add($"Frame notification dispatcher stop failed: {DescribeException(ex)}");
+                }
+            }
 
             if (oldRuntime != null)
             {
@@ -534,9 +613,12 @@ namespace LiveCaptionsTranslator.audio
                     assembler = null;
                     dataHandler = null;
                     stoppedHandler = null;
+                    publicationDispatcher = null;
                     sessionId = null;
                     inputFormat = null;
                     acceptCallbacks = false;
+                    if (oldDispatcher != null)
+                        retiredDispatchers.Add(oldDispatcher);
                 }
             }
 
@@ -608,20 +690,19 @@ namespace LiveCaptionsTranslator.audio
             }
         }
 
-        private void PublishFrame(CallbackPublicationBarrier.Lease lease, NormalizedAudioFrame frame)
+        private void PublishFrame(
+            FramePublicationDispatcher dispatcher,
+            FramePublicationNotification notification)
         {
             var handlers = FrameProduced;
             if (handlers == null)
                 return;
             foreach (EventHandler<NormalizedAudioFrame> handler in handlers.GetInvocationList())
             {
-                if (!callbackBarrier.CanPublish(lease))
+                if (!dispatcher.CanPublish(notification))
                     return;
-                using (callbackBarrier.EnterExternalPublication(lease))
-                {
-                    try { handler(this, frame); }
-                    catch (Exception) { /* External subscribers are isolated by contract. */ }
-                }
+                try { handler(this, notification.Frame); }
+                catch (Exception) { /* External subscribers are isolated by contract. */ }
             }
         }
 
@@ -670,15 +751,84 @@ namespace LiveCaptionsTranslator.audio
         {
             if (Interlocked.Exchange(ref disposeStarted, 1) != 0)
                 return;
+            var disposalFailures = new List<Exception>();
             try
             {
-                await StopAsync(CancellationToken.None).ConfigureAwait(false);
-                await endpointProvider.DisposeAsync().ConfigureAwait(false);
-                frameBuffer.Dispose();
+                try { await StopAsync(CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(
+                        new InvalidOperationException($"Service stop failed: {DescribeException(ex)}", ex));
+                }
+
+                try { await endpointProvider.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(new InvalidOperationException(
+                        $"Endpoint provider disposal failed: {DescribeException(ex)}", ex));
+                }
+
+                FramePublicationDispatcher[] dispatchers;
+                BoundedAudioFrameBuffer buffer;
+                lock (stateLock)
+                {
+                    dispatchers = retiredDispatchers
+                        .Append(publicationDispatcher)
+                        .Where(dispatcher => dispatcher != null)
+                        .Cast<FramePublicationDispatcher>()
+                        .Distinct()
+                        .ToArray();
+                    buffer = frameBuffer;
+                }
+                foreach (var dispatcher in dispatchers)
+                {
+                    try { await dispatcher.DisposeAsync().ConfigureAwait(false); }
+                    catch (Exception ex)
+                    {
+                        disposalFailures.Add(
+                            new InvalidOperationException(
+                                $"Frame notification dispatcher disposal failed: {DescribeException(ex)}", ex));
+                    }
+                }
+
+                try { buffer.Complete(); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(new InvalidOperationException(
+                        $"Frame buffer completion failed: {DescribeException(ex)}", ex));
+                }
+                try { beforeFrameBufferDispose?.Invoke(); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(new InvalidOperationException(
+                        $"Frame buffer disposal preparation failed: {DescribeException(ex)}", ex));
+                }
+                try { buffer.Dispose(); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(new InvalidOperationException(
+                        $"Frame buffer disposal failed: {DescribeException(ex)}", ex));
+                }
             }
             finally
             {
-                lifecycleGate.Dispose();
+                try { lifecycleGate.Dispose(); }
+                catch (Exception ex)
+                {
+                    disposalFailures.Add(new InvalidOperationException(
+                        $"Lifecycle gate disposal failed: {DescribeException(ex)}", ex));
+                }
+            }
+
+            if (disposalFailures.Count > 0)
+            {
+                lock (stateLock)
+                {
+                    failureReason = CombineFailures(
+                        failureReason,
+                        string.Join(" ", disposalFailures.Select(DescribeException)));
+                }
+                throw new AggregateException(disposalFailures);
             }
         }
 
@@ -706,7 +856,6 @@ namespace LiveCaptionsTranslator.audio
         {
             private readonly object gate = new();
             private readonly HashSet<Lease> active = [];
-            private readonly AsyncLocal<Lease?> externalPublication = new();
             private long generation;
             private bool accepting;
 
@@ -732,12 +881,6 @@ namespace LiveCaptionsTranslator.audio
                 }
             }
 
-            internal bool CanPublish(Lease lease)
-            {
-                lock (gate)
-                    return accepting && generation == lease.Generation && active.Contains(lease);
-            }
-
             internal void Invalidate(long expectedGeneration)
             {
                 lock (gate)
@@ -751,20 +894,12 @@ namespace LiveCaptionsTranslator.audio
             {
                 lock (gate)
                 {
-                    var excluded = externalPublication.Value;
                     var waits = active
-                        .Where(lease => lease.Generation == expectedGeneration && !ReferenceEquals(lease, excluded))
+                        .Where(lease => lease.Generation == expectedGeneration)
                         .Select(lease => lease.Completion.Task)
                         .ToArray();
                     return waits.Length == 0 ? Task.CompletedTask : Task.WhenAll(waits);
                 }
-            }
-
-            internal IDisposable EnterExternalPublication(Lease lease)
-            {
-                var previous = externalPublication.Value;
-                externalPublication.Value = lease;
-                return new Scope(() => externalPublication.Value = previous);
             }
 
             internal void Exit(Lease lease)
@@ -781,12 +916,6 @@ namespace LiveCaptionsTranslator.audio
                 internal long Generation { get; } = generation;
                 internal TaskCompletionSource<object?> Completion { get; } =
                     new(TaskCreationOptions.RunContinuationsAsynchronously);
-            }
-
-            private sealed class Scope(Action dispose) : IDisposable
-            {
-                private Action? disposeAction = dispose;
-                public void Dispose() => Interlocked.Exchange(ref disposeAction, null)?.Invoke();
             }
         }
     }

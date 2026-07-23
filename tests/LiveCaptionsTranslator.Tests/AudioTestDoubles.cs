@@ -12,6 +12,7 @@ internal sealed class FakeAudioEndpointProvider : IAudioEndpointProvider
     internal AudioEndpointEnumerationResult EnumerationResult { get; set; } =
         AudioEndpointEnumerationResult.Available([DefaultEndpoint, SavedEndpoint]);
     internal AudioEndpointResolution? ResolutionResult { get; set; }
+    internal Exception? DisposeException { get; set; }
     internal int EnumerateCount { get; private set; }
     internal int ResolveCount { get; private set; }
     internal int DisposeCount { get; private set; }
@@ -36,7 +37,9 @@ internal sealed class FakeAudioEndpointProvider : IAudioEndpointProvider
     public ValueTask DisposeAsync()
     {
         DisposeCount++;
-        return ValueTask.CompletedTask;
+        return DisposeException == null
+            ? ValueTask.CompletedTask
+            : ValueTask.FromException(DisposeException);
     }
 }
 

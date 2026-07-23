@@ -175,7 +175,7 @@ ordinary application startup or caption production:
   RMS/peak reporting, and optional normalized WAV output;
 - deterministic tests using synthetic audio and fake runtimes only.
 
-The combined test suite currently passes 182 tests with 0 failed and 0 skipped,
+The combined test suite currently passes 193 tests with 0 failed and 0 skipped,
 preserving all 100 Stage 2 tests. The main application build retains the existing
 378 reported warnings (189 unique diagnostics); Stage 3 introduces no new main-
 project warnings. A probe-project build may report the same 189 diagnostics
@@ -192,6 +192,16 @@ detach, capture-disposal, and endpoint-disposal failures. The developer probe
 now finalizes WAV output and joins service cleanup on every path, reports final
 post-cleanup diagnostics, and returns nonzero for unexpected capture, WAV, or
 cleanup failures.
+
+The remaining native-thread review issue is now hardened: the NAudio callback
+only copies, normalizes, buffers, and queues a lightweight immutable-frame
+notification. External `FrameProduced` handlers execute serially on a tracked
+managed dispatcher backed by a bounded 32-notification channel, activated only
+after `Running` publication and lifecycle-gate release. Stop/fault invalidates
+queued generation-tagged notifications; synchronous subscriber stop cannot
+deadlock a native capture-thread Join. Service disposal now attempts stop,
+endpoint-provider cleanup, dispatcher cleanup, frame-buffer cleanup, and gate
+cleanup independently and aggregates all phase failures.
 
 NAudio is pinned to 2.3.0 and is used only at the Windows audio boundary. It and
 its six 2.3.0 managed transitive packages are MIT licensed, add no new native

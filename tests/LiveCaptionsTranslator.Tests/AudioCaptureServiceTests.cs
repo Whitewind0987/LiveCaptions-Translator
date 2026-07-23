@@ -94,7 +94,9 @@ public sealed class AudioCaptureServiceTests
     {
         await using var service = CreateService(out _, out var factory);
         await service.StartAsync(null);
+        var terminal = TerminalStatus(service, expected);
         factory.Created.Single().EmitStopped(reason, "device stopped");
+        await terminal.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(expected, service.State);
         Assert.Contains("device stopped", service.FailureReason);
         Assert.True(service.FrameBuffer.IsCompleted);
@@ -208,10 +210,15 @@ public sealed class AudioCaptureServiceTests
     {
         await using var service = CreateService(out _, out var factory);
         await service.StartAsync(null);
-        service.FrameProduced += (_, _) => service.StopAsync().GetAwaiter().GetResult();
+        var subscriberCompleted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.FrameProduced += (_, _) =>
+        {
+            service.StopAsync().GetAwaiter().GetResult();
+            subscriberCompleted.TrySetResult(null);
+        };
 
-        await Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame()))
-            .WaitAsync(TimeSpan.FromSeconds(2));
+        factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame());
+        await subscriberCompleted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         Assert.Equal(AudioCaptureState.Stopped, service.State);
         Assert.Equal(1, factory.Created.Single().StopCount);

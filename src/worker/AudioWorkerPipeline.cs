@@ -59,7 +59,7 @@ namespace LiveCaptionsTranslator.worker
                 var transport = supervisor.ActiveTransport ?? throw new WorkerTransportException(AsrWorkerFailureKind.ControlPipeClosed, "Worker transport is unavailable.");
                 await transport.StartAudioStreamAsync(new StartAudioStreamPayload(worker.SessionId!.Value, captureSessionId, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), cancellationToken).ConfigureAwait(false);
                 sessionCancellation = new CancellationTokenSource();
-                pump = new AudioFramePump(capture.FrameBuffer, transport, worker.SessionId.Value, captureSessionId);
+                pump = new AudioFramePump(capture.FrameBuffer, transport, worker.SessionId.Value, captureSessionId, 1);
                 pumpTask = pump.RunAsync(sessionCancellation.Token);
                 pumpMonitorTask = MonitorPumpAsync(pumpTask);
                 await supervisor.SetStreamingAsync(true, cancellationToken).ConfigureAwait(false);
@@ -153,10 +153,29 @@ namespace LiveCaptionsTranslator.worker
                 {
                     try
                     {
+                        var diagnostics = lastPumpDiagnostics ?? throw new WorkerTransportException(AsrWorkerFailureKind.AudioPumpFailed, "Pump diagnostics are unavailable.");
+                        var end = new AudioStreamEndPayload(
+                            supervisor.SessionId.Value,
+                            captureSessionId,
+                            diagnostics.FramesSent,
+                            diagnostics.BytesSent,
+                            diagnostics.FirstSequence ?? 0,
+                            diagnostics.LastSequence ?? 0,
+                            diagnostics.SourceSequenceGaps);
+                        ValidateEnd(end, diagnostics);
+                        await transport.EndAudioStreamAsync(end, CancellationToken.None).ConfigureAwait(false);
                         summary = await transport.StopAudioStreamAsync(supervisor.SessionId.Value, captureSessionId, CancellationToken.None).ConfigureAwait(false);
-                        ValidateSummary(summary, lastPumpDiagnostics ?? throw new WorkerTransportException(AsrWorkerFailureKind.AudioPumpFailed, "Pump diagnostics are unavailable."));
+                        ValidateSummary(summary, diagnostics);
                     }
-                    catch (Exception ex) { failures.Add($"Stream summary failed validation: {ex.Message}"); }
+                    catch (Exception ex)
+                    {
+                        if (originalKind == AsrWorkerFailureKind.None && ex is WorkerTransportException transportException)
+                        {
+                            originalKind = transportException.Kind;
+                            originalReason = transportException.Message;
+                        }
+                        failures.Add($"Stream completion failed: {ex.Message}");
+                    }
                 }
 
                 try { await supervisor.SetStreamingAsync(false, CancellationToken.None).ConfigureAwait(false); } catch (InvalidOperationException) { }
@@ -186,6 +205,14 @@ namespace LiveCaptionsTranslator.worker
                 throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "Worker gap or invalid-frame totals are inconsistent.");
             if (value.FramesReceived > 0 && (value.FirstTimestampUnixMilliseconds <= 0 || value.LastTimestampUnixMilliseconds < value.FirstTimestampUnixMilliseconds))
                 throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "Worker timestamps are invalid.");
+        }
+
+        private static void ValidateEnd(AudioStreamEndPayload value, AudioFramePumpDiagnostics pumpDiagnostics)
+        {
+            if (value.FramesSent != pumpDiagnostics.FramesSent || value.PcmBytesSent != pumpDiagnostics.BytesSent ||
+                value.FirstSequence != (pumpDiagnostics.FirstSequence ?? 0) || value.FinalSequence != (pumpDiagnostics.LastSequence ?? 0) ||
+                value.SourceSequenceGaps != pumpDiagnostics.SourceSequenceGaps)
+                throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamEnd totals do not match the pump.");
         }
 
         private void OnWorkerStatusChanged(object? sender, AsrWorkerStatus status)

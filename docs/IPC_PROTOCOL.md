@@ -48,11 +48,14 @@ supplied parent PID and closes its pipe operations if the parent exits.
 The current version is major 1, minor 0.
 
 - A different major version is fatal.
+- Any envelope minor other than the negotiated/current minor is fatal.
 - `WorkerHello` advertises an inclusive supported minor range; the host selects
   the highest mutually supported minor in `HostAccept`.
 - An unknown required message type is fatal.
 - An unknown message may be ignored only when envelope flag bit 0 (`Optional`)
   is set.
+- `Optional` is valid only for an unknown extension message. Unknown flag bits,
+  or `Optional` on a known message, are fatal.
 - Malformed, truncated, oversized, out-of-order, or invalid UTF-8 data is a
   typed protocol violation and closes the session.
 
@@ -75,9 +78,9 @@ Sequences strictly increase independently in each pipe direction. Request and
 response messages share a non-empty correlation ID. Unsolicited progress and
 error messages may use an empty correlation ID.
 
-Control payloads are at most 65,536 bytes. The audio frame payload is exactly
-700 bytes. Reads and writes are exact loops; pipe read boundaries have no
-application-level meaning.
+Control payloads are at most 65,536 bytes. The audio pipe carries exact
+700-byte frames and the bounded 72-byte `AudioStreamEnd` payload. Reads and
+writes are exact loops; pipe read boundaries have no application-level meaning.
 
 ## Primitive encoding
 
@@ -112,6 +115,7 @@ application-level meaning.
 | 16 | `CaptionEvent` | caption payload below |
 | 17 | `AudioPipeHello` | worker session Guid; nonce[32]; worker PID i32 |
 | 18 | `AudioPipeAccepted` | worker session Guid; worker PID i32 |
+| 19 | `AudioStreamEnd` | worker session Guid; capture session Guid; frames sent i64; PCM bytes sent i64; first sequence i64; final sequence i64; source sequence gaps i64 |
 | 100 | `AudioFrame` | exact audio payload below |
 
 The audio summary is: capture session Guid; frames received i64; PCM bytes
@@ -164,6 +168,12 @@ accepted sequence, gap, byte, frame, sample-index, or timestamp state. It
 retains bounded statistics only;
 it does not retain unbounded audio or write WAV files.
 
+The first accepted frame may be newer than the initial sequence declared by
+`StartAudioStream`. Its sample index must be
+`(frame sequence - initial sequence) × 320`; that initial gap is included in
+the source/worker gap totals. This permits recovery after frames were dropped
+before the pump's first successful write without weakening sample continuity.
+
 ## State machines and sequences
 
 Handshake sequence:
@@ -182,14 +192,22 @@ Streaming sequence:
 StartAudioStream
 → AudioStreamStarted
 → AudioFrame* (+ bounded AudioProgress)
+→ AudioStreamEnd (audio pipe)
 → StopAudioStream
 → AudioStreamStopped
 ```
 
+`AudioStreamEnd` is the explicit audio-pipe drain barrier; pipe closure is not
+an end marker. The host stops capture, drains and joins the pump, sends one end
+message with the pump totals, then sends control `StopAudioStream`. The worker
+waits up to two seconds for the matching end message even when control Stop is
+observed first. End before start, duplicate end, wrong identity/totals/final
+sequence, frames after end, and a missing/timed-out end are protocol failures.
+
 Shutdown sequence:
 
 ```text
-stop capture → drain bounded Stage 3 buffer → stop stream
+stop capture → drain bounded Stage 3 buffer → AudioStreamEnd → stop stream
 → stop heartbeat → Shutdown → ShutdownAcknowledged → worker exit
 ```
 
@@ -207,11 +225,13 @@ failure, forced-termination failure, and cleanup failure have typed managed
 failure kinds. Human-readable text supplements but never determines the kind.
 An unsolicited worker `Error` becomes `WorkerReportedError`; it is not folded
 into a generic protocol or pipe-closure result.
-The transport exposes one stored typed terminal completion. The first worker,
-pipe, protocol, heartbeat, reader, or writer failure invalidates the generation
-and starts one stored cleanup operation; stop, restart, disposal, and the
-pipeline join that same operation. Original failure type and every later
-cleanup failure remain separately diagnosable.
+The transport exposes one stored typed terminal completion. A monitor only
+records/signals the first terminal request and returns. A separately owned,
+tracked coordinator begins cleanup after that origin can exit and can therefore
+join every heartbeat/process/transport monitor without self-await. Stop,
+restart, disposal, and the pipeline join that exact coordinator/cleanup task.
+Original failure type and every later cleanup failure remain separately
+diagnosable.
 
 The Stage 3 250-frame drop-oldest buffer remains the only PCM backpressure
 queue. The Stage 4 pump reads it directly and performs one sequential pipe
@@ -222,9 +242,9 @@ write per frame. It creates no second audio queue and no task per frame.
 Shared deterministic payload vectors are in
 `protocol/v1/test-vectors/protocol-v1.hex`. Both C# and C++ tests consume the
 same source-controlled file to decode every field, encode the expected value,
-and compare every byte for all 12 vectors, including both audio-binding
+and compare every byte for all 13 vectors, including both audio-binding
 messages. This locks field order, integer width, Guid order, timestamps, UTF-8,
-caption encoding, and the exact 700-byte audio frame.
+caption encoding, `AudioStreamEnd`, and the exact 700-byte audio frame.
 
 ## Stage 4 limitations
 

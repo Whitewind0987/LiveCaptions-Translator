@@ -14,7 +14,7 @@ public sealed class AudioFramePumpTests
     {
         var capture = Guid.NewGuid(); var worker = Guid.NewGuid(); var buffer = new BoundedAudioFrameBuffer(4); var transport = new RecordingTransport();
         buffer.TryWrite(Frame(capture, 1)); buffer.TryWrite(Frame(capture, 2)); buffer.Complete();
-        var pump = new AudioFramePump(buffer, transport, worker, capture);
+        var pump = new AudioFramePump(buffer, transport, worker, capture, 1);
         await pump.RunAsync(Token);
         Assert.Equal(new long[] { 1, 2 }, transport.Frames.Select(frame => frame.Sequence));
         Assert.All(transport.WorkerSessions, value => Assert.Equal(worker, value));
@@ -28,23 +28,34 @@ public sealed class AudioFramePumpTests
     {
         var capture = Guid.NewGuid(); var buffer = new BoundedAudioFrameBuffer(4); var transport = new RecordingTransport();
         buffer.TryWrite(Frame(capture, 2)); buffer.TryWrite(Frame(capture, 5)); buffer.Complete();
-        var pump = new AudioFramePump(buffer, transport, Guid.NewGuid(), capture);
+        var pump = new AudioFramePump(buffer, transport, Guid.NewGuid(), capture, 2);
         await pump.RunAsync(Token);
         Assert.Equal(2, pump.Diagnostics.SourceSequenceGaps);
+    }
+
+    [Fact]
+    public async Task PumpCountsGapBeforeFirstSentFrameFromInitialSequence()
+    {
+        var capture = Guid.NewGuid(); var buffer = new BoundedAudioFrameBuffer(2); var transport = new RecordingTransport();
+        buffer.TryWrite(Frame(capture, 3)); buffer.Complete();
+        var pump = new AudioFramePump(buffer, transport, Guid.NewGuid(), capture, 1);
+        await pump.RunAsync(Token);
+        Assert.Equal(2, pump.Diagnostics.SourceSequenceGaps);
+        Assert.Equal(3, pump.Diagnostics.FirstSequence);
     }
 
     [Fact]
     public async Task StaleCaptureSessionIsRejected()
     {
         var buffer = new BoundedAudioFrameBuffer(2); buffer.TryWrite(Frame(Guid.NewGuid(), 1)); buffer.Complete();
-        var pump = new AudioFramePump(buffer, new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid());
+        var pump = new AudioFramePump(buffer, new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid(), 1);
         await Assert.ThrowsAsync<InvalidOperationException>(() => pump.RunAsync(Token));
     }
 
     [Fact]
     public async Task CancellationWakesWaitingPump()
     {
-        using var cancellation = new CancellationTokenSource(); var pump = new AudioFramePump(new BoundedAudioFrameBuffer(), new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid());
+        using var cancellation = new CancellationTokenSource(); var pump = new AudioFramePump(new BoundedAudioFrameBuffer(), new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid(), 1);
         var run = pump.RunAsync(cancellation.Token); cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
     }
@@ -54,7 +65,7 @@ public sealed class AudioFramePumpTests
     {
         var capture = Guid.NewGuid(); var buffer = new BoundedAudioFrameBuffer(2); var transport = new RecordingTransport { FailAfter = 1 };
         buffer.TryWrite(Frame(capture, 1)); buffer.TryWrite(Frame(capture, 2)); buffer.Complete();
-        var pump = new AudioFramePump(buffer, transport, Guid.NewGuid(), capture);
+        var pump = new AudioFramePump(buffer, transport, Guid.NewGuid(), capture, 1);
         await Assert.ThrowsAsync<IOException>(() => pump.RunAsync(Token));
         Assert.Single(transport.Frames);
         Assert.NotNull(pump.Diagnostics.FailureReason);
@@ -77,6 +88,7 @@ public sealed class AudioFramePumpTests
         {
             if (Frames.Count >= FailAfter) throw new IOException("pipe closed"); WorkerSessions.Add(workerSessionId); Frames.Add(frame); return Task.CompletedTask;
         }
+        public Task EndAudioStreamAsync(AudioStreamEndPayload end, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<AudioStreamSummaryPayload> StopAudioStreamAsync(Guid workerSessionId, Guid captureSessionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> ShutdownAsync(Guid workerSessionId, CancellationToken cancellationToken = default) => Task.FromResult(true);

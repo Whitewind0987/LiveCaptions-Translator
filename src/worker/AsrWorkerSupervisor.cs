@@ -28,6 +28,7 @@ namespace LiveCaptionsTranslator.worker
         private Task? processMonitorTask;
         private Task? transportMonitorTask;
         private Task? terminalCleanupTask;
+        private TaskCompletionSource<TerminalRequest>? terminalSignal;
         private bool terminalResourcesReleased;
         private long generation;
         private long diagnosticTerminationGeneration;
@@ -56,6 +57,15 @@ namespace LiveCaptionsTranslator.worker
         private AsrWorkerFailureKind transportFailureKind;
         private string? transportFailureReason;
         private bool disposed;
+        private Task? disposalTask;
+        private long stateVersion;
+        private int activePublications;
+        private TaskCompletionSource publicationChanged = NewSignal();
+        private readonly AsyncLocal<int> publicationDepth = new();
+
+        private sealed record TerminalRequest(AsrWorkerFailureKind? Kind, string? Reason);
+        private sealed record StatusPublication(AsrWorkerStatus Status, long Generation, long StateVersion);
+        private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public AsrWorkerSupervisor(string executablePath, IWorkerProcessLauncher? launcher = null, IWorkerJobFactory? jobFactory = null, IAsrWorkerTransportFactory? transportFactory = null, TimeSpan? heartbeatInterval = null, TimeSpan? heartbeatTimeout = null, TimeSpan? gracefulShutdownTimeout = null)
         {
@@ -96,7 +106,7 @@ namespace LiveCaptionsTranslator.worker
         public async Task<AsrWorkerStartResult> StartAsync(CancellationToken cancellationToken = default)
         {
             long currentGeneration;
-            AsrWorkerStatus starting;
+            StatusPublication starting;
             await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -107,12 +117,14 @@ namespace LiveCaptionsTranslator.worker
                     throw new InvalidOperationException("Worker cleanup is still in progress.");
                 ResetSessionDiagnosticsLocked();
                 currentGeneration = ++generation;
+                terminalSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                terminalCleanupTask = CoordinateTerminalAsync(currentGeneration, terminalSignal.Task);
                 starting = SetStateLocked(AsrWorkerState.Starting);
             }
             finally { lifecycle.Release(); }
-            PublishIfCurrent(starting, currentGeneration);
+            PublishIfCurrent(starting);
 
-            AsrWorkerStatus? readyStatus = null;
+            StatusPublication? readyStatus = null;
             AsrWorkerFailureKind startFailure = AsrWorkerFailureKind.None;
             string? startFailureReason = null;
             Guid? startedSession = null;
@@ -170,7 +182,7 @@ namespace LiveCaptionsTranslator.worker
                 return AsrWorkerStartResult.Failed(failureState, startFailure, startFailureReason!);
             }
 
-            PublishIfCurrent(readyStatus!, currentGeneration);
+            PublishIfCurrent(readyStatus!);
             lock (stateLock)
                 return IsCurrentLocked(currentGeneration, AsrWorkerState.Ready)
                     ? AsrWorkerStartResult.Started(startedSession!.Value, startedPid!.Value)
@@ -179,16 +191,16 @@ namespace LiveCaptionsTranslator.worker
 
         public async Task<AsrWorkerStartResult> RestartAsync(CancellationToken cancellationToken = default)
         {
-            AsrWorkerStatus status;
+            StatusPublication status;
             lock (stateLock) status = SetStateLocked(AsrWorkerState.Restarting);
-            Publish(status);
+            PublishIfCurrent(status);
             await StopAsync(cancellationToken).ConfigureAwait(false);
             return await StartAsync(cancellationToken).ConfigureAwait(false);
         }
 
         public async Task SetStreamingAsync(bool streaming, CancellationToken cancellationToken = default)
         {
-            AsrWorkerStatus status;
+            StatusPublication status;
             long currentGeneration;
             await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -199,7 +211,7 @@ namespace LiveCaptionsTranslator.worker
                 status = SetStateLocked(streaming ? AsrWorkerState.Streaming : AsrWorkerState.Ready);
             }
             finally { lifecycle.Release(); }
-            PublishIfCurrent(status, currentGeneration);
+            PublishIfCurrent(status);
         }
 
         public async Task TerminateOwnedWorkerForDiagnosticsAsync(CancellationToken cancellationToken = default)
@@ -223,7 +235,7 @@ namespace LiveCaptionsTranslator.worker
         public async Task StopAsync(CancellationToken cancellationToken = default)
         {
             Task cleanup;
-            AsrWorkerStatus? stopping = null;
+            StatusPublication? stopping = null;
             long currentGeneration;
             await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -238,17 +250,15 @@ namespace LiveCaptionsTranslator.worker
                 else
                 {
                 currentGeneration = generation;
-                if (terminalCleanupTask is { IsCompleted: false }) cleanup = terminalCleanupTask;
-                else
-                {
-                    stopping = SetStateLocked(AsrWorkerState.Stopping);
-                    terminalResourcesReleased = false;
-                    cleanup = terminalCleanupTask = CleanupOwnedAsync(null, null);
-                }
+                stopping = SetStateLocked(AsrWorkerState.Stopping);
+                terminalResourcesReleased = false;
+                terminalSignal?.TrySetResult(new TerminalRequest(null, null));
+                cleanup = terminalCleanupTask ?? Task.CompletedTask;
                 }
             }
             finally { lifecycle.Release(); }
-            if (stopping != null) PublishIfCurrent(stopping, currentGeneration);
+            if (stopping != null) PublishIfCurrent(stopping);
+            await WaitForPublicationsAsync(publicationDepth.Value).ConfigureAwait(false);
             await cleanup.ConfigureAwait(false);
         }
 
@@ -309,13 +319,25 @@ namespace LiveCaptionsTranslator.worker
         {
             lock (stateLock)
             {
-                if (sessionGeneration != generation || terminalCleanupTask is { IsCompleted: false }) return;
-                failureKind = kind;
-                failureReason = reason;
-                state = kind == AsrWorkerFailureKind.WorkerExecutableMissing ? AsrWorkerState.Unavailable : AsrWorkerState.Faulted;
-                generation++;
-                terminalCleanupTask = CleanupOwnedAsync(kind, reason);
+                if (sessionGeneration != generation) return;
+                terminalSignal?.TrySetResult(new TerminalRequest(kind, reason));
             }
+        }
+
+        private async Task CoordinateTerminalAsync(long sessionGeneration, Task<TerminalRequest> signal)
+        {
+            var request = await signal.ConfigureAwait(false);
+            lock (stateLock)
+            {
+                if (sessionGeneration == generation && request.Kind.HasValue)
+                {
+                    failureKind = request.Kind.Value;
+                    failureReason = request.Reason;
+                    generation++;
+                    state = request.Kind == AsrWorkerFailureKind.WorkerExecutableMissing ? AsrWorkerState.Unavailable : AsrWorkerState.Faulted;
+                }
+            }
+            await CleanupOwnedAsync(request.Kind, request.Reason).ConfigureAwait(false);
         }
 
         private async Task CleanupOwnedAsync(AsrWorkerFailureKind? terminalKind, string? terminalReason)
@@ -391,7 +413,7 @@ namespace LiveCaptionsTranslator.worker
             await JoinAsync(ownedTransportMonitor, "Transport monitor join", failures).ConfigureAwait(false);
             try { ownedCancellation?.Dispose(); } catch (Exception ex) { failures.Add($"Session cancellation disposal failed: {ex.Message}"); }
 
-            AsrWorkerStatus terminalStatus;
+            StatusPublication terminalStatus;
             lock (stateLock)
             {
                 cleanupFailures.AddRange(failures);
@@ -408,7 +430,7 @@ namespace LiveCaptionsTranslator.worker
                 }
                 terminalResourcesReleased = true;
             }
-            Publish(terminalStatus);
+            PublishIfCurrent(terminalStatus);
         }
 
         private static async Task JoinAsync(Task? task, string phase, List<string> failures)
@@ -459,33 +481,75 @@ namespace LiveCaptionsTranslator.worker
         }
 
         private bool IsCurrentLocked(long expectedGeneration, AsrWorkerState expectedState) { lock (stateLock) return generation == expectedGeneration && state == expectedState; }
-        private AsrWorkerStatus SetStateLocked(AsrWorkerState value, AsrWorkerFailureKind kind = AsrWorkerFailureKind.None, string? reason = null)
+        private StatusPublication SetStateLocked(AsrWorkerState value, AsrWorkerFailureKind kind = AsrWorkerFailureKind.None, string? reason = null)
         {
             lock (stateLock)
             {
                 state = value;
                 if (kind != AsrWorkerFailureKind.None) { failureKind = kind; failureReason = reason; }
-                return new(value, failureKind, failureReason, DateTimeOffset.UtcNow);
+                var status = new AsrWorkerStatus(value, failureKind, failureReason, DateTimeOffset.UtcNow);
+                return new(status, generation, ++stateVersion);
             }
         }
 
-        private void PublishIfCurrent(AsrWorkerStatus status, long expectedGeneration)
-        {
-            lock (stateLock) if (generation != expectedGeneration || state != status.State) return;
-            Publish(status);
-        }
-
-        private void Publish(AsrWorkerStatus status)
+        private void PublishIfCurrent(StatusPublication publication)
         {
             foreach (EventHandler<AsrWorkerStatus> handler in StatusChanged?.GetInvocationList() ?? [])
-                try { handler(this, status); } catch (Exception ex) { Debug.WriteLine($"Worker status subscriber failed: {ex}"); }
+            {
+                lock (stateLock)
+                {
+                    if (!IsPublicationCurrentLocked(publication)) return;
+                    activePublications++;
+                    SignalPublicationChangeLocked();
+                }
+                publicationDepth.Value++;
+                try { handler(this, publication.Status); }
+                catch (Exception ex) { Debug.WriteLine($"Worker status subscriber failed: {ex}"); }
+                finally
+                {
+                    publicationDepth.Value--;
+                    lock (stateLock) { activePublications--; SignalPublicationChangeLocked(); }
+                }
+                lock (stateLock) if (!IsPublicationCurrentLocked(publication)) return;
+            }
         }
 
-        public async ValueTask DisposeAsync()
+        private bool IsPublicationCurrentLocked(StatusPublication publication) =>
+            generation == publication.Generation && stateVersion == publication.StateVersion && state == publication.Status.State;
+
+        private void SignalPublicationChangeLocked()
         {
-            if (disposed) return;
+            var previous = publicationChanged;
+            publicationChanged = NewSignal();
+            previous.TrySetResult();
+        }
+
+        private async Task WaitForPublicationsAsync(int excluded)
+        {
+            while (true)
+            {
+                Task changed;
+                lock (stateLock)
+                {
+                    if (activePublications <= excluded) return;
+                    changed = publicationChanged.Task;
+                }
+                await changed.ConfigureAwait(false);
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            lock (stateLock) disposalTask ??= DisposeCoreAsync();
+            return new ValueTask(disposalTask);
+        }
+
+        private async Task DisposeCoreAsync()
+        {
+            lock (stateLock) disposed = true;
             await StopAsync(CancellationToken.None).ConfigureAwait(false);
-            disposed = true;
+            await WaitForPublicationsAsync(publicationDepth.Value).ConfigureAwait(false);
+            lifecycle.Dispose();
         }
     }
 }

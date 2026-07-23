@@ -44,6 +44,7 @@ namespace LiveCaptionsTranslator.ipc
         CaptionEvent = 16,
         AudioPipeHello = 17,
         AudioPipeAccepted = 18,
+        AudioStreamEnd = 19,
         AudioFrame = 100
     }
 
@@ -52,6 +53,7 @@ namespace LiveCaptionsTranslator.ipc
         InvalidMagic,
         UnsupportedMajor,
         UnsupportedMinor,
+        InvalidFlags,
         UnknownRequiredMessage,
         OversizedPayload,
         TruncatedMessage,
@@ -103,14 +105,21 @@ namespace LiveCaptionsTranslator.ipc
             var major = BinaryPrimitives.ReadUInt16LittleEndian(bytes[4..]);
             if (major != IpcProtocol.Major)
                 throw new IpcProtocolException(ProtocolFailureKind.UnsupportedMajor, $"Protocol major {major} is unsupported.");
+            var minor = BinaryPrimitives.ReadUInt16LittleEndian(bytes[6..]);
+            if (minor != IpcProtocol.Minor)
+                throw new IpcProtocolException(ProtocolFailureKind.UnsupportedMinor, $"Protocol minor {minor} is unsupported.");
+            var rawType = BinaryPrimitives.ReadUInt16LittleEndian(bytes[8..]);
+            var flags = (IpcMessageFlags)BinaryPrimitives.ReadUInt16LittleEndian(bytes[10..]);
+            if ((flags & ~IpcMessageFlags.Optional) != 0 || (Enum.IsDefined(typeof(IpcMessageType), rawType) && flags != IpcMessageFlags.None))
+                throw new IpcProtocolException(ProtocolFailureKind.InvalidFlags, $"Message flags 0x{(ushort)flags:X4} are invalid for message type {rawType}.");
             var payloadLength = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);
             if (payloadLength > maximumPayload)
                 throw new IpcProtocolException(ProtocolFailureKind.OversizedPayload, $"Payload length {payloadLength} exceeds {maximumPayload}.");
             var envelope = new IpcEnvelope(
                 major,
-                BinaryPrimitives.ReadUInt16LittleEndian(bytes[6..]),
-                BinaryPrimitives.ReadUInt16LittleEndian(bytes[8..]),
-                (IpcMessageFlags)BinaryPrimitives.ReadUInt16LittleEndian(bytes[10..]),
+                minor,
+                rawType,
+                flags,
                 payloadLength,
                 BinaryPrimitives.ReadUInt64LittleEndian(bytes[16..]),
                 GuidWire.Read(bytes[24..40]));

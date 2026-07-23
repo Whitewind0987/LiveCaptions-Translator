@@ -25,7 +25,7 @@ public sealed class AudioWorkerPipelineTests
         Assert.Equal(AudioWorkerPipelineState.Stopped, pipeline.State);
         Assert.Equal(1, pipeline.Diagnostics.Pump!.FramesSent);
         Assert.Equal(1, pipeline.Diagnostics.WorkerSummary!.FramesReceived);
-        Assert.Equal(new[] { "connect", "start", "frame", "stop", "shutdown" }, worker.Transports[0].Events);
+        Assert.Equal(new[] { "connect", "start", "frame", "end", "stop", "shutdown" }, worker.Transports[0].Events);
     }
 
     [Fact]
@@ -76,7 +76,7 @@ public sealed class AudioWorkerPipelineTests
         await WaitAsync(() => worker.Transports[0].Frames.Count == 1);
         await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline.StopAsync(Token));
         Assert.Equal(AudioWorkerPipelineState.Faulted, pipeline.State);
-        Assert.Equal(AsrWorkerFailureKind.CleanupFailed, pipeline.Diagnostics.FailureKind);
+        Assert.Equal(AsrWorkerFailureKind.ProtocolViolation, pipeline.Diagnostics.FailureKind);
     }
 
     private static async Task WaitAsync(Func<bool> condition)
@@ -130,6 +130,7 @@ public sealed class AudioWorkerPipelineTests
         public Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default) { Events.Add("connect"); return Task.FromResult(new WorkerTransportStartResult(0, WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink, TimeSpan.Zero)); }
         public Task StartAudioStreamAsync(StartAudioStreamPayload request, CancellationToken cancellationToken = default) { captureSession = request.CaptureSessionId; Events.Add("start"); return Task.CompletedTask; }
         public Task SendAudioFrameAsync(Guid workerSessionId, NormalizedAudioFrame frame, CancellationToken cancellationToken = default) { if (failSend) throw new WorkerTransportException(AsrWorkerFailureKind.AudioPipeClosed, "audio closed"); Frames.Add(frame); Events.Add("frame"); return Task.CompletedTask; }
+        public Task EndAudioStreamAsync(AudioStreamEndPayload end, CancellationToken cancellationToken = default) { Events.Add("end"); return Task.CompletedTask; }
         public Task<AudioStreamSummaryPayload> StopAudioStreamAsync(Guid workerSessionId, Guid captureSessionId, CancellationToken cancellationToken = default) { Events.Add("stop"); var count = badSummary ? Frames.Count + 1 : Frames.Count; return Task.FromResult(new AudioStreamSummaryPayload(captureSession, count, count * 640L, Frames.FirstOrDefault()?.Sequence ?? 0, Frames.LastOrDefault()?.Sequence ?? 0, 0, 0, Frames.FirstOrDefault()?.CapturedAtUtc.ToUnixTimeMilliseconds() ?? 0, Frames.LastOrDefault()?.CapturedAtUtc.ToUnixTimeMilliseconds() ?? 0)); }
         public Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> ShutdownAsync(Guid workerSessionId, CancellationToken cancellationToken = default) { Events.Add("shutdown"); owner.Processes[^1].Exit(0); return Task.FromResult(true); }

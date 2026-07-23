@@ -45,12 +45,19 @@ namespace LiveCaptionsTranslator.ipc
         private IpcMessageStream? audio;
         private Task? readerTask;
         private Guid? activeCaptureSession;
+        private bool audioStreamEnded;
         private bool stopped;
         private bool disposed;
         private long sent;
         private long received;
         private long audioFramesSent;
         private long audioBytesSent;
+        private long streamFramesSent;
+        private long streamBytesSent;
+        private long streamFirstSequence;
+        private long streamLastSequence;
+        private long streamGaps;
+        private long streamInitialSequence;
 
         public NamedPipeWorkerTransport(WorkerPipeIdentity identity, TimeSpan? connectionTimeout = null, TimeSpan? readyTimeout = null)
         {
@@ -173,16 +180,25 @@ namespace LiveCaptionsTranslator.ipc
             if (accepted.WorkerSessionId != request.WorkerSessionId || accepted.CaptureSessionId != request.CaptureSessionId)
                 throw Fail(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamStarted identity does not match the request.");
             activeCaptureSession = request.CaptureSessionId;
+            audioStreamEnded = false;
+            streamFramesSent = streamBytesSent = streamFirstSequence = streamLastSequence = streamGaps = 0;
+            streamInitialSequence = request.InitialFrameSequence;
         }
 
         public async Task SendAudioFrameAsync(Guid workerSessionId, audio.NormalizedAudioFrame frame, CancellationToken cancellationToken = default)
         {
             if (activeCaptureSession != frame.SessionId) throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "Audio stream is not active for this capture session.");
+            if (audioStreamEnded) throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "Audio frames are not allowed after AudioStreamEnd.");
             try
             {
                 await WriteAudioAsync(IpcMessageType.AudioFrame, ProtocolPayloadCodec.EncodeAudioFrame(workerSessionId, frame), Guid.Empty, cancellationToken).ConfigureAwait(false);
                 Interlocked.Increment(ref audioFramesSent);
                 Interlocked.Add(ref audioBytesSent, frame.Payload.Length);
+                if (streamFramesSent == 0) { streamFirstSequence = frame.Sequence; streamGaps = frame.Sequence - streamInitialSequence; }
+                else streamGaps += frame.Sequence - streamLastSequence - 1;
+                streamLastSequence = frame.Sequence;
+                streamFramesSent++;
+                streamBytesSent += frame.Payload.Length;
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
@@ -190,12 +206,27 @@ namespace LiveCaptionsTranslator.ipc
             }
         }
 
+        public async Task EndAudioStreamAsync(AudioStreamEndPayload end, CancellationToken cancellationToken = default)
+        {
+            if (activeCaptureSession != end.CaptureSessionId || end.WorkerSessionId != identity.SessionId)
+                throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamEnd identity does not match the active stream.");
+            if (audioStreamEnded) throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamEnd was already sent.");
+            if (end.FramesSent != streamFramesSent || end.PcmBytesSent != streamBytesSent || end.FirstSequence != streamFirstSequence || end.FinalSequence != streamLastSequence || end.SourceSequenceGaps != streamGaps)
+                throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamEnd totals do not match the transmitted audio frames.");
+            try { await WriteAudioAsync(IpcMessageType.AudioStreamEnd, ProtocolPayloadCodec.Encode(end), Guid.Empty, cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            { throw Fail(AsrWorkerFailureKind.AudioPipeClosed, $"AudioStreamEnd write failed: {ex.Message}", ex); }
+            audioStreamEnded = true;
+        }
+
         public async Task<AudioStreamSummaryPayload> StopAudioStreamAsync(Guid workerSessionId, Guid captureSessionId, CancellationToken cancellationToken = default)
         {
+            if (!audioStreamEnded) throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamEnd is required before StopAudioStream.");
             var response = await RequestAsync(IpcMessageType.StopAudioStream, ProtocolPayloadCodec.Encode(new AudioStreamIdentityPayload(workerSessionId, captureSessionId)), IpcMessageType.AudioStreamStopped, cancellationToken).ConfigureAwait(false);
             var summary = ProtocolPayloadCodec.DecodeAudioStreamSummary(response.Payload);
             if (summary.CaptureSessionId != captureSessionId) throw Fail(AsrWorkerFailureKind.ProtocolViolation, "AudioStreamStopped capture session does not match.");
             activeCaptureSession = null;
+            audioStreamEnded = false;
             return summary;
         }
 

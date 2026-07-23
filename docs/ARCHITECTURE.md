@@ -231,10 +231,14 @@ caption-event schema. Shared C# and C++ golden vectors lock the wire layout. The
 complete byte contract is documented in `docs/IPC_PROTOCOL.md`.
 
 `AsrWorkerSupervisor` owns one process, two pipes, heartbeat, bounded process
-output, and one generation-aware stored terminal cleanup. Status values are
-mutated under ownership but published only after lifecycle/state locks are
-released, so synchronous reentrant stop cannot deadlock. Process, heartbeat,
-transport, protocol, and worker-error failures join the same cleanup and retain
+output, and one generation-aware stored terminal coordinator/cleanup. Each
+monitor only signals the first terminal request and returns; the separately
+tracked coordinator then joins all monitor origins without self-await. Status
+publication uses immutable generation/state-version tokens, rechecks before and
+after every subscriber, and lets reentrant lifecycle changes stop stale delivery
+to later subscribers. Stop waits in-flight publication except its own current
+callback. Process, heartbeat, transport, protocol, and worker-error failures join
+the same cleanup and retain
 their original typed cause plus all cleanup failures. It exposes explicit restart but never loops
 automatically. A Windows Job Object with kill-on-close prevents an owned worker
 from surviving an abnormal host exit; the worker independently monitors the
@@ -243,7 +247,8 @@ only the owned process tree. Process, Job Object, pipe, cancellation source, and
 long-lived task ownership remain explicit.
 
 `AudioFramePump` consumes `AudioCaptureService.FrameBuffer` directly. It
-preserves order, reports source gaps and byte/frame totals, drains buffered data
+preserves order, reports source gaps (including a gap before the first sent
+frame) and byte/frame totals, drains buffered data
 on normal completion, and performs one sequential audio-pipe write per frame.
 It creates no second PCM queue: Stage 3's fixed 250-frame drop-oldest buffer
 remains the sole audio backpressure boundary. Completed retired Stage 3 frame-
@@ -253,7 +258,8 @@ testing cannot grow their retained list without bound.
 The C++20 worker is built separately by CMake. It connects both Win32 pipes,
 authenticates, responds to heartbeat and lifecycle commands, validates the
 fixed 16 kHz mono PCM16 frame stream, maintains bounded counters, publishes
-progress every 50 frames, returns a final summary, and discards PCM. Native
+progress every 50 frames, waits for and validates an explicit audio-pipe
+`AudioStreamEnd` drain barrier before returning the final summary, and discards PCM. Native
 envelope sequences, correlations, complete payload consumption, stream state,
 and sequence-scaled sample indices are validated before statistics mutate.
 Synchronous pipe readers are woken with `CancelSynchronousIo` through retained

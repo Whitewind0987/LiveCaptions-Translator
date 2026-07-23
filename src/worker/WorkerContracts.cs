@@ -110,6 +110,7 @@ namespace LiveCaptionsTranslator.worker
         Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default);
         Task StartAudioStreamAsync(StartAudioStreamPayload request, CancellationToken cancellationToken = default);
         Task SendAudioFrameAsync(Guid workerSessionId, audio.NormalizedAudioFrame frame, CancellationToken cancellationToken = default);
+        Task EndAudioStreamAsync(AudioStreamEndPayload end, CancellationToken cancellationToken = default);
         Task<AudioStreamSummaryPayload> StopAudioStreamAsync(Guid workerSessionId, Guid captureSessionId, CancellationToken cancellationToken = default);
         Task PingAsync(CancellationToken cancellationToken = default);
         Task<bool> ShutdownAsync(Guid workerSessionId, CancellationToken cancellationToken = default);

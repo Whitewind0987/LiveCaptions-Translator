@@ -260,13 +260,22 @@ golden vectors.
 No third-party Stage 4 package, license, native DLL, or model binary was added;
 the compiled worker is a local ignored project artifact.
 
-Automated managed tests pass 250 tests with 0 failed and 0 skipped, preserving
-all 228 pre-hardening Stage 4 tests and all 193 Stage 3 tests. The x64 worker and
+The remaining Stage 4 review blockers are hardened: terminal monitor origins
+signal a separately owned coordinator instead of entering cleanup themselves;
+status publication is generation/state-version guarded; lifecycle disposal is
+joined and repeat-safe; and the audio pipe now has an explicit validated
+`AudioStreamEnd` drain barrier. Initial source gaps are counted from the stream's
+declared sequence, and managed envelope minor/flag validation matches native.
+
+Automated managed tests pass 262 tests with 0 failed and 0 skipped, preserving
+all 250 tests from the previous Stage 4 baseline and all 193 Stage 3 tests. The x64 worker and
 native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
 cross-process probes pass a five-second 250-frame synthetic stream with a real
 heartbeat, one explicit restart (200/200 aggregate frames, zero gaps), typed
 controlled worker exit with complete cleanup, and deterministic cancellation.
-No worker remained after the probe runs.
+A deterministic slow-worker/backlog probe also sent and received all 250 frames
+and 160,000 PCM bytes with zero gaps, proving that Stop waits for the audio end
+barrier rather than racing queued audio. No worker remained after the probe runs.
 
 Windows 10 real Stage 3 audio through the Stage 4 worker, manual Ctrl+C,
 heartbeat observation, process-orphan checks, and matching capture/worker

@@ -69,6 +69,11 @@ void exact_fixed_payloads(const std::map<std::string, std::vector<std::uint8_t>>
         check(metadata.worker_session == worker && metadata.capture_session == capture && metadata.sequence == 1 && metadata.sample_index == 0 && metadata.timestamp_ms == 1700000000020 && encoded == bytes, "AudioFrame exact decode/encode");
     }
     {
+        const auto& bytes = vectors.at("AudioStreamEnd"); const auto end = decode_audio_stream_end(bytes); std::vector<std::uint8_t> encoded;
+        put_guid(encoded, end.worker_session); put_guid(encoded, end.capture_session); put_i64(encoded, end.frames); put_i64(encoded, end.bytes); put_i64(encoded, end.first_sequence); put_i64(encoded, end.final_sequence); put_i64(encoded, end.gaps);
+        check(end.worker_session == worker && end.capture_session == capture && end.frames == 50 && end.bytes == 32000 && end.first_sequence == 1 && end.final_sequence == 50 && end.gaps == 2 && encoded == bytes, "AudioStreamEnd exact decode/encode");
+    }
+    {
         const auto& bytes = vectors.at("AudioProgress"); std::size_t offset = 0; stream_statistics stats{}; stats.capture_session = get_guid(bytes, offset); stats.frames = get_i64(bytes, offset); stats.bytes = get_i64(bytes, offset); stats.first_sequence = get_i64(bytes, offset); stats.last_sequence = get_i64(bytes, offset); stats.gaps = get_i64(bytes, offset); stats.invalid = get_i64(bytes, offset); stats.first_timestamp = get_i64(bytes, offset); stats.last_timestamp = get_i64(bytes, offset);
         check(stats.capture_session == capture && stats.frames == 50 && stats.bytes == 32000 && offset == bytes.size() && encode_summary(stats) == bytes, "AudioProgress exact decode/encode");
     }
@@ -99,6 +104,21 @@ void audio_validation_tests() {
     frame = { worker, capture, 6, 1600, 1120, 640 }; check(!validate_audio(stats, frame), "duplicate rejected");
     frame = { worker, capture, 7, 1920, 1099, 640 }; check(!validate_audio(stats, frame), "decreasing timestamp rejected");
     frame = { worker, capture, 7, 1920, 1120, 640 }; check(validate_audio(stats, frame), "valid recovery after rejected frame");
+
+    stream_statistics initial_gap{}; initial_gap.worker_session = worker; initial_gap.capture_session = capture; initial_gap.initial_sequence = 1;
+    frame = { worker, capture, 3, 640, 1000, 640 }; check(validate_audio(initial_gap, frame) && initial_gap.gaps == 2 && initial_gap.first_sequence == 3, "initial source gap is accepted and counted");
+    stream_statistics wrong_initial{}; wrong_initial.worker_session = worker; wrong_initial.capture_session = capture; wrong_initial.initial_sequence = 1;
+    frame = { worker, capture, 3, 320, 1000, 640 }; check(!validate_audio(wrong_initial, frame) && wrong_initial.frames == 0, "initial gap requires sequence-scaled sample index");
+    frame = { worker, capture, 3, 640, 1020, 640 }; check(validate_audio(wrong_initial, frame), "valid initial frame recovers after rejected sample index");
+    audio_stream_end end{ worker, capture, initial_gap.frames, initial_gap.bytes, initial_gap.first_sequence, initial_gap.last_sequence, initial_gap.gaps };
+    check(validate_audio_stream_end(initial_gap, end), "matching audio stream end accepted");
+    auto mismatch = end; mismatch.worker_session = {}; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end worker identity rejected");
+    mismatch = end; mismatch.capture_session = {}; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end capture identity rejected");
+    mismatch = end; mismatch.frames++; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end frame total rejected");
+    mismatch = end; mismatch.bytes++; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end byte total rejected");
+    mismatch = end; mismatch.first_sequence++; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end first sequence rejected");
+    mismatch = end; mismatch.final_sequence++; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end final sequence rejected");
+    mismatch = end; mismatch.gaps++; check(!validate_audio_stream_end(initial_gap, mismatch), "wrong end gap total rejected");
 }
 }
 
@@ -112,16 +132,17 @@ int wmain() {
     bad = envelope_bytes; bad[4] = 2; rejects([&] { decode_envelope(bad, 65536); }, "major rejected");
     bad = envelope_bytes; bad[6] = 1; rejects([&] { decode_envelope(bad, 65536); }, "minor rejected");
     bad = envelope_bytes; bad[10] = 2; rejects([&] { decode_envelope(bad, 65536); }, "flags rejected");
+    bad = envelope_bytes; bad[10] = 1; rejects([&] { decode_envelope(bad, 65536); }, "optional flag on known message rejected");
     rejects([&] { decode_envelope(std::span<const std::uint8_t>(envelope_bytes.data(), 20), 65536); }, "fragmented envelope rejected until complete");
     std::uint64_t sequence = 0; accept_sequence(sequence, 1); rejects([&] { accept_sequence(sequence, 1); }, "duplicate sequence rejected"); rejects([&] { accept_sequence(sequence, 0); }, "zero sequence rejected");
     rejects([&] { is_optional_unknown(500, 0); }, "unknown required type rejected"); check(is_optional_unknown(500, 1), "optional unknown type ignored");
     guid other{}; rejects([&] { require_correlation(worker, other); }, "correlation mismatch rejected");
     std::vector<std::uint8_t> invalid_utf8; put_u32(invalid_utf8, 1); invalid_utf8.push_back(0xff); std::size_t invalid_offset = 0; rejects([&] { get_string(invalid_utf8, invalid_offset); }, "invalid UTF-8 rejected");
     std::vector<std::uint8_t> fragmented; put_string(fragmented, "payload"); fragmented.pop_back(); std::size_t fragmented_offset = 0; rejects([&] { get_string(fragmented, fragmented_offset); }, "fragmented payload rejected until complete");
-    stream_lifecycle lifecycle; lifecycle.start(); rejects([&] { lifecycle.start(); }, "duplicate stream start rejected"); lifecycle.stop(); rejects([&] { lifecycle.stop(); }, "stop while idle rejected");
+    stream_lifecycle lifecycle; rejects([&] { lifecycle.end(); }, "end before start rejected"); lifecycle.start(); rejects([&] { lifecycle.start(); }, "duplicate stream start rejected"); lifecycle.frame(); rejects([&] { lifecycle.stop(); }, "stop without end rejected"); lifecycle.end(); rejects([&] { lifecycle.end(); }, "duplicate stream end rejected"); rejects([&] { lifecycle.frame(); }, "frame after end rejected"); lifecycle.stop(); rejects([&] { lifecycle.stop(); }, "stop while idle rejected");
 
     const auto vectors = load_vectors();
-    check(vectors.size() == 12, "all shared vectors loaded");
+    check(vectors.size() == 13, "all shared vectors loaded");
     exact_worker_hello(vectors.at("WorkerHello"));
     exact_audio_hello(vectors.at("AudioPipeHello"));
     exact_fixed_payloads(vectors);

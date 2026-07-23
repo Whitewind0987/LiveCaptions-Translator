@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -138,12 +139,17 @@ int wmain(int argc, wchar_t** argv) {
         serialized_writer control_writer(control.get());
         serialized_writer audio_writer(audio.get());
         std::atomic_bool stopping = false;
-        std::atomic_bool streaming = false;
         std::atomic<HANDLE> audio_thread_handle = nullptr;
         std::mutex statistics_mutex;
+        std::condition_variable audio_end_changed;
+        bool audio_end_received = false;
+        stream_lifecycle audio_lifecycle;
         stream_statistics statistics{};
         std::uint64_t control_sequence = 0;
         std::uint64_t audio_sequence = 0;
+        DWORD test_audio_delay_ms = 0;
+        wchar_t test_delay[16]{};
+        if (const auto length = GetEnvironmentVariableW(L"LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS", test_delay, 16); length > 0 && length < 16) test_audio_delay_ms = std::stoul(test_delay);
 
         handle parent(OpenProcess(SYNCHRONIZE, FALSE, arguments.parent));
         if (!parent.valid()) throw protocol_error("parent monitoring unavailable");
@@ -189,11 +195,26 @@ int wmain(int argc, wchar_t** argv) {
                 while (!stopping) {
                     const auto incoming = read_message(audio.get(), audio_payload_size, audio_sequence);
                     if (is_optional_unknown(incoming.env.type, incoming.env.flags)) continue;
-                    if (incoming.env.type != static_cast<std::uint16_t>(message_type::audio_frame) || !empty_guid(incoming.env.correlation)) throw protocol_error("invalid audio message");
-                    const auto metadata = decode_audio_metadata(incoming.payload);
-                    std::lock_guard lock(statistics_mutex);
-                    if (!streaming || !validate_audio(statistics, metadata)) { statistics.invalid++; continue; }
-                    if (statistics.frames % 50 == 0) control_writer.send(message_type::audio_progress, encode_summary(statistics));
+                    if (!empty_guid(incoming.env.correlation)) throw protocol_error("audio message correlation is not empty");
+                    if (incoming.env.type == static_cast<std::uint16_t>(message_type::audio_frame)) {
+                        const auto metadata = decode_audio_metadata(incoming.payload);
+                        std::lock_guard lock(statistics_mutex);
+                        audio_lifecycle.frame();
+                        if (!validate_audio(statistics, metadata)) { statistics.invalid++; continue; }
+                        if (statistics.frames % 50 == 0) control_writer.send(message_type::audio_progress, encode_summary(statistics));
+                        if (test_audio_delay_ms != 0) Sleep(test_audio_delay_ms);
+                    }
+                    else if (incoming.env.type == static_cast<std::uint16_t>(message_type::audio_stream_end)) {
+                        const auto end = decode_audio_stream_end(incoming.payload);
+                        { std::lock_guard lock(statistics_mutex);
+                            audio_lifecycle.frame();
+                            if (!validate_audio_stream_end(statistics, end)) throw protocol_error("audio stream end totals or identity do not match");
+                            audio_lifecycle.end();
+                            audio_end_received = true;
+                        }
+                        audio_end_changed.notify_all();
+                    }
+                    else throw protocol_error("invalid audio message");
                 }
             }
             catch (const std::exception& exception) {
@@ -221,7 +242,6 @@ int wmain(int argc, wchar_t** argv) {
                     control_writer.send(message_type::pong, incoming.payload, incoming.env.correlation);
                 }
                 else if (type == message_type::start_audio) {
-                    if (streaming) throw protocol_error("audio stream is already active");
                     std::size_t offset = 0;
                     if (get_guid(incoming.payload, offset) != session) throw protocol_error("worker session mismatch");
                     stream_statistics fresh{};
@@ -230,19 +250,21 @@ int wmain(int argc, wchar_t** argv) {
                     fresh.initial_sequence = get_i64(incoming.payload, offset);
                     const auto started_at = get_i64(incoming.payload, offset);
                     if (get_i32(incoming.payload, offset) != 16000 || get_u16(incoming.payload, offset) != 1 || get_u16(incoming.payload, offset) != 16 || get_u16(incoming.payload, offset) != 20 || get_u32(incoming.payload, offset) != 320 || get_u32(incoming.payload, offset) != 640 || fresh.initial_sequence < 1 || started_at <= 0 || offset != incoming.payload.size()) throw protocol_error("invalid audio format");
-                    { std::lock_guard lock(statistics_mutex); statistics = fresh; }
-                    streaming = true;
+                    { std::lock_guard lock(statistics_mutex); audio_lifecycle.start(); statistics = fresh; audio_end_received = false; }
                     control_writer.send(message_type::audio_started, identity_payload(session, fresh.capture_session), incoming.env.correlation);
                 }
                 else if (type == message_type::stop_audio) {
-                    if (!streaming) throw protocol_error("audio stream is not active");
                     std::size_t offset = 0;
                     if (get_guid(incoming.payload, offset) != session) throw protocol_error("worker session mismatch");
                     const auto capture = get_guid(incoming.payload, offset);
                     if (offset != incoming.payload.size()) throw protocol_error("stop payload has trailing bytes");
                     std::vector<std::uint8_t> summary;
-                    { std::lock_guard lock(statistics_mutex); if (capture != statistics.capture_session) throw protocol_error("capture session mismatch"); summary = encode_summary(statistics); }
-                    streaming = false;
+                    { std::unique_lock lock(statistics_mutex);
+                        if (capture != statistics.capture_session) throw protocol_error("capture session mismatch");
+                        if (!audio_end_changed.wait_for(lock, std::chrono::seconds(2), [&]{ return audio_end_received || stopping.load(); }) || !audio_end_received) throw protocol_error("timed out waiting for audio stream end");
+                        audio_lifecycle.stop();
+                        summary = encode_summary(statistics);
+                    }
                     control_writer.send(message_type::audio_stopped, summary, incoming.env.correlation);
                 }
                 else if (type == message_type::shutdown) {

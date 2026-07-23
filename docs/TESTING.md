@@ -432,15 +432,16 @@ dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
 
 Current result:
 
-- 250 passed
+- 262 passed
 - 0 failed
 - 0 skipped
-- all existing 228 pre-hardening Stage 4 tests are preserved
+- all existing 250 tests from the previous Stage 4 baseline are preserved
 - all existing 193 Stage 3 tests are preserved
 - no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
 
 Stage 4 coverage includes fixed envelope layout, RFC 4122 Guid ordering, typed
-invalid-magic/version/type/size failures, optional unknown messages, fragmented
+invalid-magic/major/minor/flag/type/size failures, optional unknown messages,
+zero/duplicate/decreasing envelope sequences, fragmented
 reads, truncated payloads, strict payload codecs, exact 700-byte audio frames,
 caption-event mapping, and exact bidirectional shared golden vectors. In-process
 two-pipe tests cover independent control/audio authentication, wrong audio
@@ -448,12 +449,16 @@ nonce/session/PID, second clients, no unauthenticated PCM exposure, distinct
 control/audio/ready timeouts, control closure, typed `WorkerReportedError`, unknown
 correlations, unexpected unsolicited messages, response identities, and
 concurrent cleanup. Fake process/job/transport tests cover generation-aware
-single terminal cleanup, immediate process/heartbeat/transport failure cleanup,
+single coordinator-owned terminal cleanup, synchronously completed
+process/heartbeat/transport monitor origins, immediate failure cleanup,
 real progress diagnostics, and synchronous reentrant Stop from Starting, Ready,
 Streaming, Faulted, Stopping, and Stopped notifications without deadlock or
-post-stop events. Pipeline tests cover continuously monitored pump failure,
+post-stop events, stale Ready suppression after subscriber A synchronously stops
+before subscriber B, and repeat-safe supervisor disposal. Pipeline tests cover continuously monitored pump failure,
 capture/worker failure cleanup, bounded pump joining, and final-summary
-validation. All earlier ordering, buffer, and repeated-session regressions are
+validation, typed root-cause retention, `AudioStreamEnd` ordering, and matching
+end/summary totals. Initial-gap tests count sequence 2/3 drops before the first
+sent frame. All earlier ordering, buffer, and repeated-session regressions are
 preserved.
 
 The normal xUnit suite uses fake processes/transports and in-process pipes. It
@@ -485,8 +490,9 @@ Native coverage includes fragmented envelope and payload input, invalid UTF-8,
 major/minor/flag validation, required/optional unknown types, independent
 sequence ordering, correlation and trailing-byte rejection, audio lifecycle,
 and candidate-before-commit stream statistics. Gap tests enforce `sequence
-delta * 320` sample-index movement and prove invalid frames leave all accepted
-statistics unchanged.
+delta * 320` sample-index movement, include first-frame gaps relative to the
+declared initial sequence, prove wrong initial sample indices leave state
+unchanged and allow recovery, and validate matching/mismatched end totals.
 
 Shared vectors are in:
 
@@ -494,9 +500,9 @@ Shared vectors are in:
 protocol/v1/test-vectors/protocol-v1.hex
 ```
 
-The 12 vectors cover `WorkerHello`, `AudioPipeHello`, `AudioPipeAccepted`,
+The 13 vectors cover `WorkerHello`, `AudioPipeHello`, `AudioPipeAccepted`,
 `HostAccept`, `WorkerReady`, `StartAudioStream`, one exact `AudioFrame`,
-`AudioProgress`, `Error`, `CaptionEvent`, `Shutdown`, and
+`AudioStreamEnd`, `AudioProgress`, `Error`, `CaptionEvent`, `Shutdown`, and
 `ShutdownAcknowledged`. C# and C++ tests both decode every expected field,
 encode the expected value, and compare the exact bytes with the fixture.
 
@@ -551,9 +557,22 @@ Result: **passed** with exit code 0 and `Requested cancellation completed
 cleanly.` No worker process remained. Interactive keyboard Ctrl+C remains part
 of manual acceptance.
 
+Deterministic slow-worker drain-barrier command:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker native/AsrWorker/build/windows-x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 5 --slow-worker
+```
+
+Result: **passed**. The native reader was deliberately delayed while the host
+published a 250-frame burst, forcing an audio-pipe backlog. The explicit end
+barrier drained before the control stop summary: 250 frames and 160,000 PCM
+bytes were sent and received, with 0 gaps, 0 heartbeat failures, acknowledged
+shutdown, no forced termination, exit code 0, no cleanup failures, and no
+remaining worker.
+
 ## Stage 4 developer probe
 
-Synthetic, restart, controlled-exit, and deterministic cancellation modes are
+Synthetic, slow-worker barrier, restart, controlled-exit, and deterministic cancellation modes are
 shown above. Real Stage 3 audio uses the production capture service, buffer,
 worker transport, and coordinator without WAV transport:
 

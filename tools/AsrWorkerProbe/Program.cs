@@ -5,7 +5,7 @@ using LiveCaptionsTranslator.worker;
 
 internal static class Program
 {
-    private sealed record Options(string Worker, bool Synthetic, bool Audio, bool Restart, bool ControlledExit, string? Device, int DurationSeconds, int? CancelAfterMilliseconds);
+    private sealed record Options(string Worker, bool Synthetic, bool Audio, bool Restart, bool ControlledExit, bool SlowWorker, string? Device, int DurationSeconds, int? CancelAfterMilliseconds);
 
     public static async Task<int> Main(string[] args)
     {
@@ -28,6 +28,10 @@ internal static class Program
 
     private static async Task<int> RunSyntheticAsync(Options options, CancellationToken cancellationToken)
     {
+        var previousDelay = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS");
+        if (options.SlowWorker) Environment.SetEnvironmentVariable("LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS", "5");
+        try
+        {
         var total = System.Diagnostics.Stopwatch.StartNew();
         await using var supervisor = new AsrWorkerSupervisor(options.Worker);
         var result = await supervisor.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -41,17 +45,18 @@ internal static class Program
         {
             await supervisor.TerminateOwnedWorkerForDiagnosticsAsync(cancellationToken).ConfigureAwait(false);
             await WaitForStateAsync(supervisor, AsrWorkerState.Faulted, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+            await WaitForDiagnosticsAsync(supervisor, diagnostics => diagnostics.ProcessExitCode.HasValue && supervisor.ActiveTransport == null, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            summary = await StreamSyntheticAsync(supervisor, options.DurationSeconds, () => generated++, cancellationToken).ConfigureAwait(false);
+            summary = await StreamSyntheticAsync(supervisor, options.DurationSeconds, options.SlowWorker, () => generated++, cancellationToken).ConfigureAwait(false);
             workerReceived += summary.FramesReceived;
             workerGaps += summary.SequenceGaps;
             if (options.Restart)
             {
                 var restarted = await supervisor.RestartAsync(cancellationToken).ConfigureAwait(false);
                 if (!restarted.Success || restarted.SessionId == originalSession) throw new InvalidOperationException("Explicit restart did not create a new worker session.");
-                summary = await StreamSyntheticAsync(supervisor, 1, () => generated++, cancellationToken).ConfigureAwait(false);
+                summary = await StreamSyntheticAsync(supervisor, 1, options.SlowWorker, () => generated++, cancellationToken).ConfigureAwait(false);
                 workerReceived += summary.FramesReceived;
                 workerGaps += summary.SequenceGaps;
             }
@@ -86,9 +91,11 @@ internal static class Program
         if (!options.ControlledExit && options.DurationSeconds >= 5 && beforeStop.LatestPongAtUtc == null) return 1;
         if (options.ControlledExit && (beforeStop.State != AsrWorkerState.Faulted || beforeStop.FailureKind != AsrWorkerFailureKind.WorkerExited || beforeStop.CleanupFailures.Count != 0 || beforeStop.ForcedTerminationUsed || beforeStop.ProcessExitCode == null)) return 1;
         return 0;
+        }
+        finally { Environment.SetEnvironmentVariable("LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS", previousDelay); }
     }
 
-    private static async Task<AudioStreamSummaryPayload> StreamSyntheticAsync(AsrWorkerSupervisor supervisor, int seconds, Action generated, CancellationToken cancellationToken)
+    private static async Task<AudioStreamSummaryPayload> StreamSyntheticAsync(AsrWorkerSupervisor supervisor, int seconds, bool slowWorker, Action generated, CancellationToken cancellationToken)
     {
         var transport = supervisor.ActiveTransport ?? throw new InvalidOperationException("Transport missing.");
         var workerSession = supervisor.SessionId!.Value; var capture = Guid.NewGuid(); var frames = Math.Max(1, seconds * 50);
@@ -101,8 +108,9 @@ internal static class Program
             for (var p = 0; p < payload.Length; p++) payload[p] = (byte)((i + p) & 0xff);
             var frame = new NormalizedAudioFrame(capture, i + 1, i * NormalizedAudioFormat.SamplesPerFrame, started.AddMilliseconds(i * 20), payload);
             await transport.SendAudioFrameAsync(workerSession, frame, cancellationToken).ConfigureAwait(false); generated();
-            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            if (!slowWorker) await Task.Delay(20, cancellationToken).ConfigureAwait(false);
         }
+        await transport.EndAudioStreamAsync(new AudioStreamEndPayload(workerSession, capture, frames, frames * NormalizedAudioFormat.BytesPerFrame, 1, frames, 0), cancellationToken).ConfigureAwait(false);
         var summary = await transport.StopAudioStreamAsync(workerSession, capture, cancellationToken).ConfigureAwait(false);
         await supervisor.SetStreamingAsync(false, cancellationToken).ConfigureAwait(false);
         return summary;
@@ -151,9 +159,16 @@ internal static class Program
         if (supervisor.State != state) throw new TimeoutException($"Worker did not reach {state}.");
     }
 
+    private static async Task WaitForDiagnosticsAsync(AsrWorkerSupervisor supervisor, Func<AsrWorkerDiagnostics, bool> condition, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var until = DateTimeOffset.UtcNow + timeout;
+        while (!condition(supervisor.Diagnostics) && DateTimeOffset.UtcNow < until) await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+        if (!condition(supervisor.Diagnostics)) throw new TimeoutException("Worker cleanup diagnostics did not settle.");
+    }
+
     private static Options Parse(string[] args)
     {
-        string? worker = null, device = "default"; var synthetic = false; var audio = false; var restart = false; var controlled = false; var duration = 5; int? cancelAfter = null;
+        string? worker = null, device = "default"; var synthetic = false; var audio = false; var restart = false; var controlled = false; var slowWorker = false; var duration = 5; int? cancelAfter = null;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -163,6 +178,7 @@ internal static class Program
                 case "--audio": audio = true; break;
                 case "--restart": restart = true; break;
                 case "--controlled-exit": controlled = true; break;
+                case "--slow-worker": slowWorker = true; break;
                 case "--device": device = args[++i]; break;
                 case "--duration": duration = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;
                 case "--cancel-after-ms": cancelAfter = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;
@@ -171,7 +187,8 @@ internal static class Program
         }
         if (string.IsNullOrWhiteSpace(worker) || synthetic == audio || duration < 1) throw new ArgumentException("Specify --worker and exactly one of --synthetic or --audio with a positive duration.");
         if (cancelAfter <= 0) throw new ArgumentException("Cancellation delay must be positive.");
-        return new(Path.GetFullPath(worker), synthetic, audio, restart, controlled, device, duration, cancelAfter);
+        if (slowWorker && !synthetic) throw new ArgumentException("--slow-worker requires --synthetic.");
+        return new(Path.GetFullPath(worker), synthetic, audio, restart, controlled, slowWorker, device, duration, cancelAfter);
     }
-    private static void Usage() => Console.Error.WriteLine("AsrWorkerProbe --worker <exe> (--synthetic|--audio) [--device default|id] [--duration N] [--restart|--controlled-exit] [--cancel-after-ms N]");
+    private static void Usage() => Console.Error.WriteLine("AsrWorkerProbe --worker <exe> (--synthetic|--audio) [--device default|id] [--duration N] [--restart|--controlled-exit] [--slow-worker] [--cancel-after-ms N]");
 }

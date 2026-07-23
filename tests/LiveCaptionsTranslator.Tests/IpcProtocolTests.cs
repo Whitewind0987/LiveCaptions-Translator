@@ -27,6 +27,9 @@ public sealed class IpcProtocolTests
     [InlineData(1, ProtocolFailureKind.UnsupportedMajor)]
     [InlineData(2, ProtocolFailureKind.OversizedPayload)]
     [InlineData(3, ProtocolFailureKind.UnknownRequiredMessage)]
+    [InlineData(4, ProtocolFailureKind.UnsupportedMinor)]
+    [InlineData(5, ProtocolFailureKind.InvalidFlags)]
+    [InlineData(6, ProtocolFailureKind.InvalidFlags)]
     public void InvalidEnvelopesAreTyped(int scenario, ProtocolFailureKind expected)
     {
         var bytes = new IpcEnvelope(1, 0, 1, 0, 0, 1, Guid.Empty).Encode();
@@ -34,6 +37,9 @@ public sealed class IpcProtocolTests
         if (scenario == 1) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), 2);
         if (scenario == 2) BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(12), IpcProtocol.MaximumControlPayload + 1);
         if (scenario == 3) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(8), 999);
+        if (scenario == 4) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6), 1);
+        if (scenario == 5) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(10), 2);
+        if (scenario == 6) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(10), (ushort)IpcMessageFlags.Optional);
         var ex = Assert.Throws<IpcProtocolException>(() => IpcEnvelope.Decode(bytes, IpcProtocol.MaximumControlPayload));
         Assert.Equal(expected, ex.Kind);
     }
@@ -62,6 +68,20 @@ public sealed class IpcProtocolTests
         await using var stream = new IpcMessageStream(new MemoryStream(header.Concat(new byte[2]).ToArray()));
         var ex = await Assert.ThrowsAsync<IpcProtocolException>(() => stream.ReadAsync(Token));
         Assert.Equal(ProtocolFailureKind.TruncatedMessage, ex.Kind);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(2, 1)]
+    public async Task ZeroDuplicateAndDecreasingEnvelopeSequencesAreRejected(ulong first, ulong second)
+    {
+        var firstHeader = new IpcEnvelope(1, 0, (ushort)IpcMessageType.WorkerReady, 0, 0, first, Guid.Empty).Encode();
+        var secondHeader = new IpcEnvelope(1, 0, (ushort)IpcMessageType.WorkerReady, 0, 0, second, Guid.Empty).Encode();
+        await using var stream = new IpcMessageStream(new MemoryStream(first == 0 ? firstHeader : firstHeader.Concat(secondHeader).ToArray()));
+        if (first != 0) Assert.NotNull(await stream.ReadAsync(Token));
+        var ex = await Assert.ThrowsAsync<IpcProtocolException>(() => stream.ReadAsync(Token));
+        Assert.Equal(ProtocolFailureKind.OutOfOrder, ex.Kind);
     }
 
     [Fact]
@@ -131,6 +151,7 @@ public sealed class IpcProtocolTests
         Assert.Equal(vectors["StartAudioStream"], ProtocolPayloadCodec.Encode(new StartAudioStreamPayload(Worker, Capture, 1, 1700000000000)));
         var frame = new NormalizedAudioFrame(Capture, 1, 0, DateTimeOffset.FromUnixTimeMilliseconds(1700000000020), new byte[640]);
         Assert.Equal(vectors["AudioFrame"], ProtocolPayloadCodec.EncodeAudioFrame(Worker, frame));
+        Assert.Equal(vectors["AudioStreamEnd"], ProtocolPayloadCodec.Encode(new AudioStreamEndPayload(Worker, Capture, 50, 32000, 1, 50, 2)));
         Assert.Equal(vectors["AudioProgress"], ProtocolPayloadCodec.Encode(new AudioStreamSummaryPayload(Capture, 50, 32000, 1, 50, 0, 0, 1700000000020, 1700000001000)));
         Assert.Equal(vectors["Error"], ProtocolPayloadCodec.Encode(new ErrorPayload((WorkerErrorKind)2, "vector error")));
         var caption = new CaptionEvent(1, Capture, 2, 1, 1, CaptionEventKind.Partial, "hello", 0, 20, DateTimeOffset.FromUnixTimeMilliseconds(1700000001000));
@@ -150,6 +171,7 @@ public sealed class IpcProtocolTests
         Assert.Equal(1234, ProtocolPayloadCodec.DecodeAudioPipeAccepted(v["AudioPipeAccepted"]).WorkerPid);
         Assert.Equal(Capture, ProtocolPayloadCodec.DecodeStartAudioStream(v["StartAudioStream"]).CaptureSessionId);
         Assert.Equal(1, ProtocolPayloadCodec.DecodeAudioFrame(v["AudioFrame"]).Frame.Sequence);
+        Assert.Equal(2, ProtocolPayloadCodec.DecodeAudioStreamEnd(v["AudioStreamEnd"]).SourceSequenceGaps);
         Assert.Equal(50, ProtocolPayloadCodec.DecodeAudioStreamSummary(v["AudioProgress"]).FramesReceived);
         Assert.Equal("vector error", ProtocolPayloadCodec.DecodeError(v["Error"]).Diagnostic);
         Assert.Equal("hello", ProtocolPayloadCodec.DecodeCaptionEvent(v["CaptionEvent"]).Text);

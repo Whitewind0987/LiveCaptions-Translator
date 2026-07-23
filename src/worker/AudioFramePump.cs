@@ -12,6 +12,7 @@ namespace LiveCaptionsTranslator.worker
         private readonly IAsrWorkerTransport transport;
         private readonly Guid workerSessionId;
         private readonly Guid captureSessionId;
+        private readonly long initialSequence;
         private long framesSent;
         private long bytesSent;
         private long sequenceGaps;
@@ -19,12 +20,14 @@ namespace LiveCaptionsTranslator.worker
         private long? lastSequence;
         private string? failureReason;
 
-        public AudioFramePump(BoundedAudioFrameBuffer source, IAsrWorkerTransport transport, Guid workerSessionId, Guid captureSessionId)
+        public AudioFramePump(BoundedAudioFrameBuffer source, IAsrWorkerTransport transport, Guid workerSessionId, Guid captureSessionId, long initialSequence)
         {
             this.source = source ?? throw new ArgumentNullException(nameof(source));
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
             this.workerSessionId = workerSessionId;
             this.captureSessionId = captureSessionId;
+            if (initialSequence < 1) throw new ArgumentOutOfRangeException(nameof(initialSequence));
+            this.initialSequence = initialSequence;
         }
 
         public AudioFramePumpDiagnostics Diagnostics => new(Interlocked.Read(ref framesSent), Interlocked.Read(ref bytesSent), Interlocked.Read(ref sequenceGaps), firstSequence, lastSequence, Volatile.Read(ref failureReason));
@@ -43,6 +46,11 @@ namespace LiveCaptionsTranslator.worker
                     {
                         if (frame.Sequence <= lastSequence.Value) throw new InvalidOperationException("Audio frame order is not strictly increasing.");
                         if (frame.Sequence > lastSequence.Value + 1) Interlocked.Add(ref sequenceGaps, frame.Sequence - lastSequence.Value - 1);
+                    }
+                    else
+                    {
+                        if (frame.Sequence < initialSequence) throw new InvalidOperationException("Audio frame sequence precedes the stream's initial sequence.");
+                        if (frame.Sequence > initialSequence) Interlocked.Add(ref sequenceGaps, frame.Sequence - initialSequence);
                     }
                     firstSequence ??= frame.Sequence;
                     await transport.SendAudioFrameAsync(workerSessionId, frame, cancellationToken).ConfigureAwait(false);

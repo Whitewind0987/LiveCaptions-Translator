@@ -61,6 +61,25 @@ public sealed class AsrWorkerSupervisorTests
         Assert.Equal(AsrWorkerFailureKind.ControlPipeClosed, supervisor.Diagnostics.TransportFailureKind);
     }
 
+    [Theory]
+    [InlineData("process")]
+    [InlineData("transport")]
+    [InlineData("heartbeat")]
+    public async Task SynchronouslyCompletedMonitorOriginIsJoinedByCoordinator(string origin)
+    {
+        var fixture = new Fixture
+        {
+            ProcessInitiallyExited = origin == "process",
+            TransportInitiallyFailed = origin == "transport",
+            FailPing = origin == "heartbeat"
+        };
+        await using var supervisor = fixture.Create(heartbeatInterval: origin == "heartbeat" ? TimeSpan.Zero : TimeSpan.FromHours(1));
+        await supervisor.StartAsync(Token);
+        await WaitAsync(() => supervisor.State == AsrWorkerState.Faulted && fixture.TransportFactory.Transports[0].DisposeCount == 1);
+        Assert.Equal(1, fixture.TransportFactory.Transports[0].StopCount);
+        Assert.Equal(1, fixture.Launcher.Processes[0].DisposeCount);
+    }
+
     [Fact]
     public async Task ProgressPopulatesSupervisorDiagnostics()
     {
@@ -115,6 +134,26 @@ public sealed class AsrWorkerSupervisorTests
     }
 
     [Fact]
+    public async Task ReentrantReadyStopPreventsLaterSubscriberFromReceivingStaleReady()
+    {
+        var fixture = new Fixture(); await using var supervisor = fixture.Create(); var staleReady = 0;
+        supervisor.StatusChanged += (_, status) => { if (status.State == AsrWorkerState.Ready) supervisor.StopAsync(Token).GetAwaiter().GetResult(); };
+        supervisor.StatusChanged += (_, status) => { if (status.State == AsrWorkerState.Ready) Interlocked.Increment(ref staleReady); };
+        await supervisor.StartAsync(Token);
+        await WaitAsync(() => supervisor.State == AsrWorkerState.Stopped);
+        Assert.Equal(0, staleReady);
+    }
+
+    [Fact]
+    public async Task RepeatedDisposeJoinsCleanupAndIsSafe()
+    {
+        var fixture = new Fixture(); var supervisor = fixture.Create(); await supervisor.StartAsync(Token);
+        await supervisor.DisposeAsync();
+        await supervisor.DisposeAsync();
+        Assert.Equal(1, fixture.TransportFactory.Transports[0].DisposeCount);
+    }
+
+    [Fact]
     public async Task JobAssignmentResultIsRetained()
     {
         var fixture = new Fixture(); await using var supervisor = fixture.Create(); await supervisor.StartAsync(Token);
@@ -124,18 +163,20 @@ public sealed class AsrWorkerSupervisorTests
     private sealed class Fixture
     {
         public bool FailPing { get; init; }
-        public FakeLauncher Launcher { get; } = new();
+        public bool ProcessInitiallyExited { get; init; }
+        public bool TransportInitiallyFailed { get; init; }
+        public FakeLauncher Launcher { get; }
         public FakeJobFactory JobFactory { get; } = new();
         public FakeTransportFactory TransportFactory { get; }
-        public Fixture() { TransportFactory = new FakeTransportFactory(Launcher, this); }
+        public Fixture() { Launcher = new FakeLauncher(this); TransportFactory = new FakeTransportFactory(Launcher, this); }
         public AsrWorkerSupervisor Create(string? path = null, TimeSpan? heartbeatInterval = null, TimeSpan? heartbeatTimeout = null) => new(path ?? ExistingPath(), Launcher, JobFactory, TransportFactory, heartbeatInterval ?? TimeSpan.FromHours(1), heartbeatTimeout ?? TimeSpan.FromHours(1), TimeSpan.FromMilliseconds(50));
         private static string ExistingPath() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "AGENTS.md"));
     }
 
-    private sealed class FakeLauncher : IWorkerProcessLauncher
+    private sealed class FakeLauncher(Fixture fixture) : IWorkerProcessLauncher
     {
         public int LaunchCount { get; private set; } public List<FakeProcess> Processes { get; } = [];
-        public Task<IWorkerProcess> LaunchAsync(WorkerLaunchRequest request, CancellationToken cancellationToken = default) { var process = new FakeProcess(1000 + ++LaunchCount); Processes.Add(process); return Task.FromResult<IWorkerProcess>(process); }
+        public Task<IWorkerProcess> LaunchAsync(WorkerLaunchRequest request, CancellationToken cancellationToken = default) { var process = new FakeProcess(1000 + ++LaunchCount); Processes.Add(process); if (fixture.ProcessInitiallyExited) process.Exit(31); return Task.FromResult<IWorkerProcess>(process); }
     }
 
     private sealed class FakeProcess(int id) : IWorkerProcess
@@ -171,9 +212,10 @@ public sealed class AsrWorkerSupervisorTests
         private readonly TaskCompletionSource<WorkerTransportFailure> terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public event EventHandler<AudioStreamSummaryPayload>? ProgressReceived; public event EventHandler<ErrorPayload>? ErrorReceived;
         public long ControlMessagesSent => 2; public long ControlMessagesReceived => 2; public long AudioFramesSent => 3; public long AudioBytesSent => 1920; public DateTimeOffset? LatestPongAtUtc => DateTimeOffset.UtcNow; public Task<WorkerTransportFailure> TerminalFailure => terminal.Task; public int StopCount { get; private set; } public int DisposeCount { get; private set; }
-        public Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default) => Task.FromResult(new WorkerTransportStartResult(0, WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink, TimeSpan.Zero));
+        public Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default) { if (fixture.TransportInitiallyFailed) terminal.TrySetResult(new(AsrWorkerFailureKind.ProtocolViolation, "precompleted transport failure")); return Task.FromResult(new WorkerTransportStartResult(0, WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink, TimeSpan.Zero)); }
         public Task StartAudioStreamAsync(StartAudioStreamPayload request, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SendAudioFrameAsync(Guid workerSessionId, NormalizedAudioFrame frame, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task EndAudioStreamAsync(AudioStreamEndPayload end, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<AudioStreamSummaryPayload> StopAudioStreamAsync(Guid workerSessionId, Guid captureSessionId, CancellationToken cancellationToken = default) => Task.FromResult(new AudioStreamSummaryPayload(captureSessionId, 0, 0, 0, 0, 0, 0, 0, 0));
         public Task PingAsync(CancellationToken cancellationToken = default) => fixture.FailPing ? Task.FromException(new TimeoutException("ping")) : Task.CompletedTask;
         public Task<bool> ShutdownAsync(Guid workerSessionId, CancellationToken cancellationToken = default) { launcher.Processes[^1].Exit(0); return Task.FromResult(true); }

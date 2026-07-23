@@ -25,6 +25,9 @@ namespace LiveCaptionsTranslator.models
         private string targetLanguage;
         private string prompt;
         private string? ignoredUpdateVersion;
+        private string? audioOutputDeviceId;
+        private string savePath = FILENAME;
+        private bool autoSaveEnabled;
 
         private MainWindowState mainWindowState;
         private OverlayWindowState overlayWindowState;
@@ -106,6 +109,28 @@ namespace LiveCaptionsTranslator.models
                 ignoredUpdateVersion = value;
                 OnPropertyChanged("IgnoredUpdateVersion");
             }
+        }
+
+        [JsonIgnore]
+        public string? AudioOutputDeviceId
+        {
+            get => audioOutputDeviceId;
+            set
+            {
+                var normalized = NormalizeAudioOutputDeviceId(value);
+                if (string.Equals(audioOutputDeviceId, normalized, StringComparison.Ordinal))
+                    return;
+                audioOutputDeviceId = normalized;
+                OnPropertyChanged(nameof(AudioOutputDeviceId));
+            }
+        }
+
+        [JsonInclude]
+        [JsonPropertyName("AudioOutputDeviceId")]
+        public string? PersistedAudioOutputDeviceId
+        {
+            get => audioOutputDeviceId;
+            private set => audioOutputDeviceId = NormalizeAudioOutputDeviceId(value);
         }
 
         public MainWindowState MainWindow
@@ -274,12 +299,16 @@ namespace LiveCaptionsTranslator.models
                     setting.ConfigIndices[key] = 0;
             }
 
+            setting.audioOutputDeviceId = NormalizeAudioOutputDeviceId(setting.audioOutputDeviceId);
+            setting.savePath = jsonPath;
+            setting.autoSaveEnabled = true;
+
             return setting;
         }
 
         public void Save()
         {
-            Save(FILENAME);
+            Save(savePath);
         }
 
         public void Save(string jsonPath)
@@ -298,8 +327,12 @@ namespace LiveCaptionsTranslator.models
         public void OnPropertyChanged([CallerMemberName] string? propName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
-            Translator.Setting?.Save();
+            if (autoSaveEnabled)
+                Save(savePath);
         }
+
+        internal static string? NormalizeAudioOutputDeviceId(string? endpointId) =>
+            string.IsNullOrWhiteSpace(endpointId) ? null : endpointId.Trim();
 
         public static bool IsConfigExist()
         {

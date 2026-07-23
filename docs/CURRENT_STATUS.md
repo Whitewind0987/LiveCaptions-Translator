@@ -2,17 +2,20 @@
 
 ## Repository state
 
-- Branch: `feature/caption-source-abstraction`
-- Baseline commit: `7a6fe4a5b294dacc4aa1b3666981d6c00dbcd183`
+- Branch: `feature/wasapi-audio-capture`
+- Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
 - Completed stages:
   - Stage 0 environment and baseline verification
   - Stage 1 optional Windows Live Captions startup, verified on Windows 10
   - Stage 2A source-independent contracts and event-ordering core
   - Stage 2B Windows Live Captions source adapter and production integration
-- Current status: Stage 2 is complete and accepted on Windows 10; Windows 11
-  runtime verification remains pending
-- Next stage: Stage 3, only after explicit approval
+  - Stage 3 WPF audio-capture foundation implementation and automated tests
+- Current status: Stage 2 is complete and accepted on Windows 10. Stage 3 is
+  implemented and passes automated tests; real-device runtime acceptance on
+  Windows 10 and Windows 11 remains pending
+- Next stage: finish Stage 3 manual audio-capture acceptance. Stage 4 must not
+  begin without explicit approval
 
 ## Environment
 
@@ -148,6 +151,44 @@ no repeated Live Captions launch attempt, and clean process shutdown. Stage 2
 is complete and accepted on Windows 10.
 
 Windows 11 runtime behavior remains unverified and no Windows 11 checks are
-recorded as passed. Stage 3 has not begun and is the next stage only after
-explicit approval.
+recorded as passed.
+
+## Stage 3 implementation
+
+Stage 3 adds the WPF-owned audio-capture foundation without connecting it to
+ordinary application startup or caption production:
+
+- asynchronous enumeration of active Windows render endpoints, multimedia-
+  default resolution, saved-device selection, and explicit fallback reasons;
+- an `AudioOutputDeviceId` setting and non-blocking settings-page selector;
+- a narrow NAudio 2.3.0 WASAPI loopback runtime with explicit resource ownership;
+- streaming float32 and PCM16/24/32 decoding, multi-channel downmix, stateful
+  resampling, and exact 16 kHz mono PCM16 little-endian output;
+- immutable 20 ms frames (320 samples, 640 bytes) with capture-session identity,
+  sequence, sample index, and monotonic time;
+- a bounded 250-frame drop-oldest buffer with exact overflow diagnostics and
+  cancellation-aware reads;
+- serialized start/stop/restart/disposal, stale-callback rejection, typed
+  unavailable/faulted states, retained failure reasons, and deterministic
+  cleanup;
+- a developer-only command-line probe for endpoint listing, bounded capture,
+  RMS/peak reporting, and optional normalized WAV output;
+- deterministic tests using synthetic audio and fake runtimes only.
+
+The combined test suite currently passes 166 tests with 0 failed and 0 skipped,
+preserving all 100 Stage 2 tests. The main application build retains the existing
+378 reported warnings (189 unique diagnostics); Stage 3 introduces no new main-
+project warnings. A probe-project build may report the same 189 diagnostics
+while rebuilding its main-project reference; no warning originates in the probe
+or new Stage 3 audio source.
+
+NAudio is pinned to 2.3.0 and is used only at the Windows audio boundary. It and
+its six 2.3.0 managed transitive packages are MIT licensed, add no new native
+binaries, and occupy approximately 705 KiB as compressed NuGet packages in the
+local cache.
+
+Real Windows 10 and Windows 11 endpoint enumeration, capture, device switching,
+device loss, bounded-duration probe, and clean process/resource shutdown remain
+manual Stage 3 acceptance work. Speech recognition is not implemented and Stage
+4 has not begun.
 

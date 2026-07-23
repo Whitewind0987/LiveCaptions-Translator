@@ -3,9 +3,10 @@
 ## Status
 
 This document records the planned architecture for the Windows 10/11-compatible
-fork. Stage 2A implements the source-independent caption contracts and ordering
-core. Stage 2B implements the Windows Live Captions source adapter and integrates
-those contracts into the production runtime.
+fork. Stage 2 implements and integrates the source-independent caption
+contracts and Windows Live Captions adapter. Stage 3 implements the WPF-owned
+WASAPI loopback capture, normalization, framing, and bounded-buffer foundation.
+IPC and speech recognition remain future stages.
 
 ## Objective
 
@@ -98,6 +99,71 @@ independent of the endpoint's native sample rate, channel layout, or sample
 representation. The ASR worker receives only normalized PCM and owns VAD and
 inference. Capture, conversion, buffering, IPC, VAD, and recognition must be
 testable as separate stages.
+
+## Stage 3 WPF audio capture foundation
+
+Stage 3 implements the part of the audio path that belongs in the WPF process:
+
+```text
+active render endpoint
+→ NAudio WASAPI loopback callback
+→ streaming format decoder and channel downmix
+→ stateful linear resampling
+→ 16 kHz mono PCM16 little-endian
+→ 20 ms immutable frames
+→ bounded drop-oldest buffer
+```
+
+The Windows-specific boundary is limited to endpoint enumeration and
+`WasapiLoopbackCaptureRuntime`. The rest of the pipeline depends on narrow
+managed contracts and is deterministic under unit tests. Endpoint selection
+uses the saved render-endpoint ID when it is currently active; otherwise it
+falls back to the current multimedia default and retains an explicit fallback
+diagnostic. The settings page enumerates active render endpoints asynchronously,
+shows the resolved system default, keeps a missing saved endpoint visible, and
+persists only a stable endpoint ID. Enumeration alone never starts capture.
+
+The streaming normalizer supports interleaved IEEE float32 and PCM16, PCM24,
+and PCM32 input. It preserves incomplete input blocks across callbacks, averages
+all channels to mono using floating-point arithmetic, clamps the result, and
+uses a stateful linear interpolator so splitting the same input into different
+callback sizes produces the same normalized sample stream. Reset discards all
+decoder and resampler remainder.
+
+The normalized contract is fixed at 16,000 samples per second, one channel,
+signed PCM16 little-endian. `AudioFrameAssembler` emits immutable 20 ms frames:
+320 samples and 640 bytes per frame, with a capture-session ID, sequence number,
+starting sample index, and monotonic timestamp. Partial frame data is retained
+between callbacks and discarded on stop or restart. A successful restart creates
+a new session and resets both sequence and sample-index state.
+
+`BoundedAudioFrameBuffer` has a fixed default capacity of 250 frames (five
+seconds). When full it drops the oldest frame, never exceeds the bound, and
+records the exact drop count. Reads are cancellation-aware and completion wakes
+waiting readers. Overflow is available through diagnostics rather than a
+per-frame UI/status notification, avoiding a status-event storm.
+
+`AudioCaptureService` is the single lifecycle owner for endpoint resolution,
+one native runtime, normalization, framing, buffering, cancellation, and
+cleanup. Starts and stops are serialized; duplicate starts are predictable;
+stale callbacks from an old runtime are ignored; subscriber exceptions are
+isolated; expected and unexpected native stops are distinguished; and failure
+states retain explicit reasons. Stop and asynchronous disposal independently
+attempt native cleanup and are safe to repeat. Device loss becomes an explicit
+unavailable or faulted status rather than an exception escaping a callback.
+
+Ordinary application startup deliberately does not construct or start
+`AudioCaptureService`. Stage 3 exposes the capture foundation and a separate
+developer probe, but production capture will begin only when a future IPC
+consumer has explicit lifecycle ownership. Stage 3 does not add IPC, a worker,
+VAD, Whisper, models, caption production, or translation changes.
+
+NAudio is pinned at 2.3.0 for the Windows WASAPI and Core Audio boundary. It is
+MIT licensed and supports the application's Windows-targeted .NET runtime. The
+package brings the managed NAudio.Asio, NAudio.Core, NAudio.Midi, NAudio.Wasapi,
+NAudio.WinForms, and NAudio.WinMM 2.3.0 packages. It adds no new native binary;
+the seven compressed NuGet packages total approximately 705 KiB in the local
+package cache. Only the Windows adapter exposes NAudio device or capture types.
 
 ## Caption event lifecycle
 

@@ -220,13 +220,121 @@ available.
 - Application exit restores and terminates the source-owned process: **pending**
 - No orphan process remains: **pending**
 
-## Future fixed audio fixtures
+## Stage 3 automated tests
 
-To be defined in a later implementation stage. No fixture results are recorded
-in Stage 0.
+Commands:
 
-## Future regression tests
+```powershell
+dotnet restore
+dotnet build
+dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
+dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
+```
 
-To be defined and populated as implementation stages add independently testable
-behavior. No regression-test results are recorded in Stage 0.
+Current result:
+
+- 166 passed
+- 0 failed
+- 0 skipped
+- all existing 100 Stage 2 tests are preserved
+- main application: 378 reported warnings, 0 errors; the warnings represent the
+  existing 189 source diagnostics reported once for the WPF temporary project
+  and once for the main project
+- developer probe: builds successfully; when its main-project reference is
+  rebuilt, the command reports the existing 189 main-project diagnostics and 0
+  errors, with no warning originating in probe or Stage 3 audio source
+- new Stage 3 warnings: none
+
+Stage 3 tests cover saved/default/missing endpoint resolution, enumeration
+ordering and diagnostics, settings compatibility and persistence, float32 and
+PCM16/24/32 decoding, mono and multi-channel downmix, clipping and byte order,
+48 kHz and 44.1 kHz resampling, callback-boundary equivalence, reset behavior,
+exact frame boundaries, session/sequence/sample-index reset, immutable payloads,
+bounded drop-oldest behavior, cancellation and completion, start/stop/restart,
+duplicate and concurrent lifecycle calls, expected and unexpected native stops,
+device-unavailable and faulted outcomes, stale callback rejection, subscriber
+isolation, cleanup, RMS/peak calculation, WAV finalization, and bounded probe
+duration.
+
+All audio samples are generated in memory and all service tests use fake
+endpoint providers and capture runtimes. Automated tests do not enumerate or
+open real audio devices, start the WPF application, access the network, launch
+Windows Live Captions, write repository runtime settings/history files, or
+leave probe processes or WAV artifacts.
+
+## Stage 3 developer probe
+
+List active render endpoints and the resolved system default:
+
+```powershell
+dotnet run --project tools/AudioCaptureProbe/AudioCaptureProbe.csproj -- --list
+```
+
+Capture the default endpoint for ten seconds and report normalized-frame count,
+drops, duration, RMS, peak, endpoint/input-format details, and failures:
+
+```powershell
+dotnet run --project tools/AudioCaptureProbe/AudioCaptureProbe.csproj -- --duration 10 --device default
+```
+
+Optionally write the normalized 16 kHz mono PCM16 stream as a diagnostic WAV:
+
+```powershell
+dotnet run --project tools/AudioCaptureProbe/AudioCaptureProbe.csproj -- --duration 10 --device default --wav probe.wav
+```
+
+`--device` also accepts an endpoint ID returned by `--list`. The probe is a
+developer tool and is excluded from the WPF application's compile items. A WAV
+path is used only when explicitly supplied; generated WAV files are diagnostic
+artifacts and must not be committed.
+
+## Stage 3 Windows 10 manual checklist
+
+All checks are **pending** until run interactively on Windows 10 while known
+audio is playing:
+
+- `--list` returns active render endpoints without blocking: **pending**
+- The current default endpoint is correctly marked: **pending**
+- Settings lists active endpoints and identifies the resolved system default:
+  **pending**
+- A saved active endpoint resolves and remains selected after application
+  restart: **pending**
+- A missing saved endpoint is visible and falls back safely with a clear
+  diagnostic: **pending**
+- Ordinary WPF startup remains unchanged and starts no audio capture: **pending**
+- With clearly audible speech or video playing, the default-endpoint probe runs
+  for at least ten seconds: **pending**
+- Capture state reaches `Running`: **pending**
+- The selected endpoint and native input format are reported: **pending**
+- Normalized format reports 16,000 Hz, mono, signed PCM16 little-endian:
+  **pending**
+- Frames are produced and consumed and their sequences are continuous:
+  **pending**
+- Dropped-frame count remains 0 under normal conditions: **pending**
+- RMS is greater than zero while audio is playing: **pending**
+- Peak remains in the valid normalized PCM range: **pending**
+- The optional normalized WAV has a valid header, expected duration, and is
+  audible without gross speed, distortion, or channel errors: **pending**
+- Repeated start/stop and a second start create clean new sessions: **pending**
+- Stopping the probe and pressing Ctrl+C both end capture promptly and cleanly:
+  **pending**
+- Exit leaves no `AudioCaptureProbe` or `LiveCaptionsTranslator` process and no
+  locked audio/WAV resource: **pending**
+- Disconnecting or disabling the selected endpoint produces a useful state and
+  failure reason without crashing WPF, where practical to test: **pending**
+- Existing Settings, History, overlay, pause/resume, and Windows 10 unavailable-
+  source behavior remain unchanged: **pending**
+
+## Stage 3 Windows 11 manual checklist
+
+All Stage 3 Windows 11 audio checks are **pending**. Repeat the Windows 10
+endpoint, capture, format, level, device-loss, restart, cancellation, and clean-
+exit checks on Windows 11. The existing Stage 2B Windows Live Captions checklist
+also remains pending and must not be inferred from Stage 3 build or unit tests.
+
+## Later-stage fixtures and regression tests
+
+Stage 3 uses generated audio fixtures only. Recorded speech fixtures, IPC,
+workers, VAD, Whisper, caption generation, translation-version integration, and
+recognition quality or latency tests belong to later explicitly approved stages.
 

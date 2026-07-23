@@ -292,6 +292,35 @@
                     </ui:Flyout>
                 </StackPanel>
             </StackPanel>
+
+            <StackPanel Margin="15,10,0,0" Orientation="Vertical">
+                <TextBlock Margin="2.5,0,0,5" Text="System Audio Output" />
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox
+                        x:Name="AudioOutputDeviceBox"
+                        Width="190"
+                        Height="30"
+                        Padding="8,4,8,7"
+                        DisplayMemberPath="DisplayName"
+                        SelectionChanged="AudioOutputDeviceBox_SelectionChanged" />
+                    <ui:Button
+                        Width="30"
+                        Height="30"
+                        Margin="5,0,0,0"
+                        Padding="5"
+                        Click="RefreshAudioDevicesButton_Click"
+                        ToolTip="Refresh output devices">
+                        <ui:SymbolIcon Symbol="ArrowSync20" />
+                    </ui:Button>
+                </StackPanel>
+                <TextBlock
+                    x:Name="AudioOutputDeviceStatus"
+                    Width="225"
+                    Margin="2.5,4,0,0"
+                    FontSize="10"
+                    Opacity="0.75"
+                    TextWrapping="Wrap" />
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Page>

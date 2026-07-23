@@ -185,6 +185,27 @@ Run them with:
 dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
 ```
 
+The Stage 3 developer audio probe is located in:
+
+```text
+tools/AudioCaptureProbe/
+```
+
+Build it with:
+
+```powershell
+dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
+```
+
+Use the probe only for explicit interactive audio-capture verification. Unit
+tests must use generated audio and fake endpoint/capture runtimes rather than
+opening real devices. Ordinary WPF startup must not start audio capture until a
+later stage provides an explicit IPC consumer and lifecycle owner.
+
+NAudio belongs only at the narrow Windows endpoint-enumeration and WASAPI
+runtime boundary. UI, buffering, normalization contracts, and tests must not
+expose or depend on NAudio device objects.
+
 Existing baseline warnings must not be presented as newly introduced warnings.
 
 When warnings are relevant, distinguish between:

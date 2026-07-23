@@ -126,6 +126,8 @@ public sealed class IpcProtocolTests
         Assert.Equal(vectors["WorkerHello"], ProtocolPayloadCodec.Encode(new WorkerHelloPayload(Worker, nonce, 1234, 0, 0, "stage4-vector", (WorkerCapabilities)3)));
         Assert.Equal(vectors["HostAccept"], ProtocolPayloadCodec.Encode(new HostAcceptPayload(Worker, 0, 16000, 1, 16, 20, 320, 640)));
         Assert.Equal(vectors["WorkerReady"], ProtocolPayloadCodec.Encode(new WorkerReadyPayload(Worker, 1234)));
+        Assert.Equal(vectors["AudioPipeHello"], ProtocolPayloadCodec.Encode(new AudioPipeHelloPayload(Worker, nonce, 1234)));
+        Assert.Equal(vectors["AudioPipeAccepted"], ProtocolPayloadCodec.Encode(new AudioPipeAcceptedPayload(Worker, 1234)));
         Assert.Equal(vectors["StartAudioStream"], ProtocolPayloadCodec.Encode(new StartAudioStreamPayload(Worker, Capture, 1, 1700000000000)));
         var frame = new NormalizedAudioFrame(Capture, 1, 0, DateTimeOffset.FromUnixTimeMilliseconds(1700000000020), new byte[640]);
         Assert.Equal(vectors["AudioFrame"], ProtocolPayloadCodec.EncodeAudioFrame(Worker, frame));
@@ -144,6 +146,8 @@ public sealed class IpcProtocolTests
         Assert.Equal(Worker, ProtocolPayloadCodec.DecodeWorkerHello(v["WorkerHello"]).SessionId);
         Assert.Equal(16000, ProtocolPayloadCodec.DecodeHostAccept(v["HostAccept"]).SampleRate);
         Assert.Equal(1234, ProtocolPayloadCodec.DecodeWorkerReady(v["WorkerReady"]).WorkerPid);
+        Assert.Equal(Worker, ProtocolPayloadCodec.DecodeAudioPipeHello(v["AudioPipeHello"]).SessionId);
+        Assert.Equal(1234, ProtocolPayloadCodec.DecodeAudioPipeAccepted(v["AudioPipeAccepted"]).WorkerPid);
         Assert.Equal(Capture, ProtocolPayloadCodec.DecodeStartAudioStream(v["StartAudioStream"]).CaptureSessionId);
         Assert.Equal(1, ProtocolPayloadCodec.DecodeAudioFrame(v["AudioFrame"]).Frame.Sequence);
         Assert.Equal(50, ProtocolPayloadCodec.DecodeAudioStreamSummary(v["AudioProgress"]).FramesReceived);

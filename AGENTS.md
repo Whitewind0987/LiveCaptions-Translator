@@ -234,6 +234,11 @@ lifecycle gate is held. Terminal callback failures and unexpected native stops
 must share one stored cleanup operation that `StopAsync` and `DisposeAsync`
 join; cleanup errors must be aggregated rather than discarded.
 
+Stage 4 supervisor status subscribers also run outside lifecycle ownership.
+Both named pipes must authenticate the same session, nonce, and owned PID before
+audio transport begins. Any protocol change must update both codecs, all exact
+C#/C++ golden-vector checks, and `docs/IPC_PROTOCOL.md` together.
+
 Native audio callback threads must never execute arbitrary external frame
 subscribers. Frame notifications must cross a tracked, serialized, bounded
 managed dispatcher whose stop/disposal is joined, except for its explicitly

@@ -242,10 +242,11 @@ Stage 4 transport foundation.
 
 ## Stage 4 implementation
 
-Stage 4 adds protocol 1.0, two random current-user named pipes, nonce/session/PID
-authentication, explicit capability negotiation, normalized PCM transport,
-heartbeat, typed failures, bounded diagnostics, explicit restart, and owned-
-process cleanup. `AsrWorkerSupervisor`, `NamedPipeWorkerTransport`,
+Stage 4 adds protocol 1.0, two random current-user named pipes, independent
+nonce/session/PID authentication for both pipes, explicit capability
+negotiation, normalized PCM transport, heartbeat, typed terminal failures,
+bounded live progress diagnostics, explicit restart, and generation-aware
+owned-process cleanup. `AsrWorkerSupervisor`, `NamedPipeWorkerTransport`,
 `AudioFramePump`, and `AudioWorkerPipeline` keep transport, process, audio, and
 coordination responsibilities separate. The Stage 3 250-frame buffer remains
 the sole PCM backlog; completed publication dispatchers are pruned between
@@ -254,16 +255,18 @@ repeated sessions.
 The separately built C++20 `LiveCaptionsAsrWorker.exe` uses Win32 pipes and
 parent monitoring, validates and discards normalized frames, reports bounded
 progress/final summaries, and shuts down cleanly. A host Job Object uses
-kill-on-close. Shared textual golden vectors are consumed by both languages.
+kill-on-close. C# and C++ both exactly decode and re-encode all shared textual
+golden vectors.
 No third-party Stage 4 package, license, native DLL, or model binary was added;
 the compiled worker is a local ignored project artifact.
 
-Automated managed tests pass 228 tests with 0 failed and 0 skipped, preserving
-all 193 Stage 3 tests. The x64 worker and native test executable build with MSVC
-`/W4 /WX`; CTest passes 1 of 1. Real C++ cross-process probes passed for a
-100-frame synthetic stream, one explicit restart (100/100 aggregate frames,
-zero gaps), controlled unexpected worker exit, and deterministic Ctrl+C-
-equivalent cancellation. No worker remained after the probe runs.
+Automated managed tests pass 250 tests with 0 failed and 0 skipped, preserving
+all 228 pre-hardening Stage 4 tests and all 193 Stage 3 tests. The x64 worker and
+native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
+cross-process probes pass a five-second 250-frame synthetic stream with a real
+heartbeat, one explicit restart (200/200 aggregate frames, zero gaps), typed
+controlled worker exit with complete cleanup, and deterministic cancellation.
+No worker remained after the probe runs.
 
 Windows 10 real Stage 3 audio through the Stage 4 worker, manual Ctrl+C,
 heartbeat observation, process-orphan checks, and matching capture/worker

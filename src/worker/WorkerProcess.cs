@@ -62,7 +62,7 @@ namespace LiveCaptionsTranslator.worker
         public IReadOnlyList<string> RecentStderr => stderr.Snapshot();
         private static async Task DrainAsync(StreamReader reader, BoundedLineBuffer target) { while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line) target.Add(line); }
         private async Task CompleteAsync() { await process.WaitForExitAsync().ConfigureAwait(false); await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false); }
-        public Task TerminateTreeAsync(CancellationToken cancellationToken = default) { cancellationToken.ThrowIfCancellationRequested(); if (!process.HasExited) process.Kill(entireProcessTree: true); return process.WaitForExitAsync(cancellationToken); }
+        public Task TerminateTreeAsync(CancellationToken cancellationToken = default) { cancellationToken.ThrowIfCancellationRequested(); if (!process.HasExited) process.Kill(entireProcessTree: true); return completion.WaitAsync(cancellationToken); }
         public async ValueTask DisposeAsync() { if (Interlocked.Exchange(ref disposed, 1) != 0) return; if (!process.HasExited) await TerminateTreeAsync().ConfigureAwait(false); await completion.ConfigureAwait(false); process.Dispose(); }
     }
 

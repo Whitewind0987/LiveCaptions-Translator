@@ -215,12 +215,13 @@ package cache. Only the Windows adapter exposes NAudio device or capture types.
 
 Stage 4 establishes the final process boundary without adding recognition. The
 WPF-side host creates one random full-duplex control pipe and one independent
-random host-to-worker audio pipe for each session, then launches exactly one
+random audio pipe for each session, then launches exactly one
 explicitly located `LiveCaptionsAsrWorker.exe`. A random authentication nonce is
 inherited through a private environment value rather than exposed on the
-command line. Handshake validation binds both pipes to the new worker-session
-Guid, nonce, and owned process ID and negotiates protocol 1.0 plus the fixed
-Stage 3 audio format.
+command line. Control `WorkerHello` and independent audio `AudioPipeHello`
+proofs bind both pipes to the same worker-session Guid, nonce, and owned process
+ID before any PCM is exposed, then negotiate protocol 1.0 plus the fixed Stage
+3 audio format.
 
 The binary little-endian protocol uses a fixed envelope, bounded payloads,
 strict UTF-8, RFC 4122 Guid ordering, per-direction message sequences, typed
@@ -230,7 +231,11 @@ caption-event schema. Shared C# and C++ golden vectors lock the wire layout. The
 complete byte contract is documented in `docs/IPC_PROTOCOL.md`.
 
 `AsrWorkerSupervisor` owns one process, two pipes, heartbeat, bounded process
-output, and deterministic cleanup. It exposes explicit restart but never loops
+output, and one generation-aware stored terminal cleanup. Status values are
+mutated under ownership but published only after lifecycle/state locks are
+released, so synchronous reentrant stop cannot deadlock. Process, heartbeat,
+transport, protocol, and worker-error failures join the same cleanup and retain
+their original typed cause plus all cleanup failures. It exposes explicit restart but never loops
 automatically. A Windows Job Object with kill-on-close prevents an owned worker
 from surviving an abnormal host exit; the worker independently monitors the
 supplied parent PID. Graceful shutdown is bounded and forced termination targets
@@ -248,7 +253,11 @@ testing cannot grow their retained list without bound.
 The C++20 worker is built separately by CMake. It connects both Win32 pipes,
 authenticates, responds to heartbeat and lifecycle commands, validates the
 fixed 16 kHz mono PCM16 frame stream, maintains bounded counters, publishes
-progress every 50 frames, returns a final summary, and discards PCM. Stage 4
+progress every 50 frames, returns a final summary, and discards PCM. Native
+envelope sequences, correlations, complete payload consumption, stream state,
+and sequence-scaled sample indices are validated before statistics mutate.
+Synchronous pipe readers are woken with `CancelSynchronousIo` through retained
+thread handles and every thread is joined with a bounded policy. Stage 4
 adds no VAD, Whisper, CUDA, models, recognition, caption production, or ASR
 native DLL loaded by WPF. Stage 5 and Stage 6 remain future work. Ordinary WPF
 startup does not start audio capture or the worker.

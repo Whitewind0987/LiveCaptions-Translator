@@ -38,6 +38,8 @@ namespace LiveCaptionsTranslator.ipc
     public sealed record HostAcceptPayload(Guid SessionId, ushort NegotiatedMinor, int SampleRate, ushort Channels, ushort BitsPerSample, ushort FrameMilliseconds, uint SamplesPerFrame, uint BytesPerFrame);
     public sealed record HostRejectPayload(ProtocolRejectReason Reason, string Diagnostic);
     public sealed record WorkerReadyPayload(Guid SessionId, int WorkerPid);
+    public sealed record AudioPipeHelloPayload(Guid SessionId, byte[] Nonce, int WorkerPid);
+    public sealed record AudioPipeAcceptedPayload(Guid SessionId, int WorkerPid);
     public sealed record StartAudioStreamPayload(Guid WorkerSessionId, Guid CaptureSessionId, long InitialFrameSequence, long StartedAtUnixMilliseconds, int SampleRate = NormalizedAudioFormat.SampleRate, ushort Channels = NormalizedAudioFormat.Channels, ushort BitsPerSample = NormalizedAudioFormat.BitsPerSample, ushort FrameMilliseconds = NormalizedAudioFormat.FrameDurationMilliseconds, uint SamplesPerFrame = NormalizedAudioFormat.SamplesPerFrame, uint BytesPerFrame = NormalizedAudioFormat.BytesPerFrame);
     public sealed record AudioStreamIdentityPayload(Guid WorkerSessionId, Guid CaptureSessionId);
     public sealed record AudioStreamSummaryPayload(Guid CaptureSessionId, long FramesReceived, long PcmBytesReceived, long FirstSequence, long LastSequence, long SequenceGaps, long InvalidFrames, long FirstTimestampUnixMilliseconds, long LastTimestampUnixMilliseconds);
@@ -63,6 +65,10 @@ namespace LiveCaptionsTranslator.ipc
         public static HostRejectPayload DecodeHostReject(ReadOnlySpan<byte> b) { var r = new PayloadReader(b); var v = new HostRejectPayload((ProtocolRejectReason)r.UInt16(), r.String()); r.RequireEnd(); return v; }
         public static byte[] Encode(WorkerReadyPayload v) { var w = new PayloadWriter(); w.Guid(v.SessionId); w.Int32(v.WorkerPid); return w.ToArray(); }
         public static WorkerReadyPayload DecodeWorkerReady(ReadOnlySpan<byte> b) { var r = new PayloadReader(b); var v = new WorkerReadyPayload(r.Guid(), r.Int32()); r.RequireEnd(); return v; }
+        public static byte[] Encode(AudioPipeHelloPayload v) { if (v.Nonce.Length != IpcProtocol.NonceBytes) throw new ArgumentException("Nonce must be 32 bytes."); var w = new PayloadWriter(); w.Guid(v.SessionId); w.Bytes(v.Nonce); w.Int32(v.WorkerPid); return w.ToArray(); }
+        public static AudioPipeHelloPayload DecodeAudioPipeHello(ReadOnlySpan<byte> b) { var r = new PayloadReader(b); var v = new AudioPipeHelloPayload(r.Guid(), r.Bytes(IpcProtocol.NonceBytes), r.Int32()); r.RequireEnd(); return v; }
+        public static byte[] Encode(AudioPipeAcceptedPayload v) { var w = new PayloadWriter(); w.Guid(v.SessionId); w.Int32(v.WorkerPid); return w.ToArray(); }
+        public static AudioPipeAcceptedPayload DecodeAudioPipeAccepted(ReadOnlySpan<byte> b) { var r = new PayloadReader(b); var v = new AudioPipeAcceptedPayload(r.Guid(), r.Int32()); r.RequireEnd(); return v; }
         public static byte[] Encode(StartAudioStreamPayload v) { var w = new PayloadWriter(); w.Guid(v.WorkerSessionId); w.Guid(v.CaptureSessionId); w.Int64(v.InitialFrameSequence); w.Int64(v.StartedAtUnixMilliseconds); w.Int32(v.SampleRate); w.UInt16(v.Channels); w.UInt16(v.BitsPerSample); w.UInt16(v.FrameMilliseconds); w.UInt32(v.SamplesPerFrame); w.UInt32(v.BytesPerFrame); return w.ToArray(); }
         public static StartAudioStreamPayload DecodeStartAudioStream(ReadOnlySpan<byte> b) { var r = new PayloadReader(b); var v = new StartAudioStreamPayload(r.Guid(), r.Guid(), r.Int64(), r.Int64(), r.Int32(), r.UInt16(), r.UInt16(), r.UInt16(), r.UInt32(), r.UInt32()); r.RequireEnd(); return v; }
         public static byte[] Encode(AudioStreamIdentityPayload v) { var w = new PayloadWriter(); w.Guid(v.WorkerSessionId); w.Guid(v.CaptureSessionId); return w.ToArray(); }

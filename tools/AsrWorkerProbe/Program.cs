@@ -60,7 +60,7 @@ internal static class Program
         await supervisor.StopAsync(cancellationToken).ConfigureAwait(false);
         var final = supervisor.Diagnostics;
         Console.WriteLine($"Worker path: {options.Worker}");
-        Console.WriteLine($"Worker PID: {beforeStop.WorkerPid}");
+        Console.WriteLine($"Worker PID: {result.ProcessId}");
         Console.WriteLine($"Worker session: {originalSession}");
         Console.WriteLine($"Negotiated protocol: {beforeStop.NegotiatedProtocol}");
         Console.WriteLine($"Capabilities: {beforeStop.Capabilities}");
@@ -69,13 +69,22 @@ internal static class Program
         Console.WriteLine($"Worker frames received: {workerReceived}");
         Console.WriteLine($"Worker sequence gaps: {workerGaps}");
         Console.WriteLine($"Heartbeat failures: {beforeStop.HeartbeatFailures}");
+        Console.WriteLine($"Latest Pong: {beforeStop.LatestPongAtUtc?.ToString("O") ?? "none"}");
+        Console.WriteLine($"Audio frames sent: {beforeStop.AudioFramesSent}");
+        Console.WriteLine($"Audio bytes sent: {beforeStop.AudioBytesSent}");
+        Console.WriteLine($"Job assigned: {final.JobAssignmentSucceeded}");
         Console.WriteLine($"Shutdown acknowledged: {final.GracefulShutdownSucceeded}");
+        Console.WriteLine($"Forced termination: {final.ForcedTerminationUsed}");
         Console.WriteLine($"Worker exit code: {final.ProcessExitCode}");
         Console.WriteLine($"Final state: {final.State}");
-        Console.WriteLine($"Cleanup failures: {final.FailureReason ?? "none"}");
+        Console.WriteLine($"Failure kind: {final.FailureKind}");
+        Console.WriteLine($"Failure reason: {final.FailureReason ?? "none"}");
+        Console.WriteLine($"Cleanup failures: {(final.CleanupFailures.Count == 0 ? "none" : string.Join(" | ", final.CleanupFailures))}");
         Console.WriteLine($"Total duration: {total.Elapsed.TotalSeconds:F2} s");
-        if (!options.ControlledExit && (summary == null || workerReceived != generated || workerGaps != 0 || !final.GracefulShutdownSucceeded)) return 1;
-        if (options.ControlledExit && beforeStop.State != AsrWorkerState.Faulted) return 1;
+        var expectedCapabilities = WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink;
+        if (!options.ControlledExit && (summary == null || workerReceived != generated || workerGaps != 0 || summary.InvalidFrames != 0 || !final.GracefulShutdownSucceeded || final.ForcedTerminationUsed || final.ProcessExitCode != 0 || final.CleanupFailures.Count != 0 || beforeStop.Capabilities != expectedCapabilities)) return 1;
+        if (!options.ControlledExit && options.DurationSeconds >= 5 && beforeStop.LatestPongAtUtc == null) return 1;
+        if (options.ControlledExit && (beforeStop.State != AsrWorkerState.Faulted || beforeStop.FailureKind != AsrWorkerFailureKind.WorkerExited || beforeStop.CleanupFailures.Count != 0 || beforeStop.ForcedTerminationUsed || beforeStop.ProcessExitCode == null)) return 1;
         return 0;
     }
 
@@ -84,7 +93,7 @@ internal static class Program
         var transport = supervisor.ActiveTransport ?? throw new InvalidOperationException("Transport missing.");
         var workerSession = supervisor.SessionId!.Value; var capture = Guid.NewGuid(); var frames = Math.Max(1, seconds * 50);
         await transport.StartAudioStreamAsync(new StartAudioStreamPayload(workerSession, capture, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), cancellationToken).ConfigureAwait(false);
-        supervisor.MarkStreaming(true);
+        await supervisor.SetStreamingAsync(true, cancellationToken).ConfigureAwait(false);
         var started = DateTimeOffset.UtcNow;
         for (var i = 0; i < frames; i++)
         {
@@ -95,7 +104,7 @@ internal static class Program
             await Task.Delay(20, cancellationToken).ConfigureAwait(false);
         }
         var summary = await transport.StopAudioStreamAsync(workerSession, capture, cancellationToken).ConfigureAwait(false);
-        supervisor.MarkStreaming(false);
+        await supervisor.SetStreamingAsync(false, cancellationToken).ConfigureAwait(false);
         return summary;
     }
 
@@ -112,8 +121,27 @@ internal static class Program
         Console.WriteLine($"Frames sent: {diagnostics.Pump?.FramesSent}");
         Console.WriteLine($"Worker frames: {diagnostics.WorkerSummary?.FramesReceived}");
         Console.WriteLine($"Sequence gaps: {diagnostics.WorkerSummary?.SequenceGaps}");
+        Console.WriteLine($"Capture dropped: {diagnostics.Capture.FramesDropped}");
+        Console.WriteLine($"Pump bytes: {diagnostics.Pump?.BytesSent}");
+        Console.WriteLine($"Pump source gaps: {diagnostics.Pump?.SourceSequenceGaps}");
+        Console.WriteLine($"Worker invalid frames: {diagnostics.WorkerSummary?.InvalidFrames}");
+        var worker = supervisor.Diagnostics;
+        Console.WriteLine($"Heartbeat failures: {worker.HeartbeatFailures}");
+        Console.WriteLine($"Latest Pong: {worker.LatestPongAtUtc?.ToString("O") ?? "none"}");
+        Console.WriteLine($"Job assigned: {worker.JobAssignmentSucceeded}");
+        Console.WriteLine($"Graceful shutdown: {worker.GracefulShutdownSucceeded}");
+        Console.WriteLine($"Forced termination: {worker.ForcedTerminationUsed}");
+        Console.WriteLine($"Worker exit code: {worker.ProcessExitCode}");
+        Console.WriteLine($"Failure kind: {diagnostics.FailureKind}");
+        Console.WriteLine($"Failure: {diagnostics.FailureReason ?? "none"}");
+        Console.WriteLine($"Cleanup failures: {(diagnostics.CleanupFailures.Count == 0 ? "none" : string.Join(" | ", diagnostics.CleanupFailures))}");
         Console.WriteLine($"Final state: {diagnostics.State}");
-        return diagnostics.State == AudioWorkerPipelineState.Stopped ? 0 : 1;
+        var captureFrames = diagnostics.Capture.FramesProduced - diagnostics.Capture.FramesDropped;
+        var sent = diagnostics.Pump?.FramesSent ?? -1;
+        var received = diagnostics.WorkerSummary?.FramesReceived ?? -1;
+        var stopBoundaryRemainder = Math.Max(0, captureFrames - sent);
+        var validBoundary = stopBoundaryRemainder <= 3;
+        return diagnostics.State == AudioWorkerPipelineState.Stopped && diagnostics.FailureKind == AsrWorkerFailureKind.None && diagnostics.Capture.FramesDropped == 0 && validBoundary && sent == received && diagnostics.Pump?.SourceSequenceGaps == 0 && diagnostics.WorkerSummary?.SequenceGaps == 0 && diagnostics.WorkerSummary?.InvalidFrames == 0 && worker.HeartbeatFailures == 0 && worker.JobAssignmentSucceeded && worker.GracefulShutdownSucceeded && !worker.ForcedTerminationUsed && worker.ProcessExitCode == 0 && diagnostics.CleanupFailures.Count == 0 ? 0 : 1;
     }
 
     private static async Task WaitForStateAsync(AsrWorkerSupervisor supervisor, AsrWorkerState state, TimeSpan timeout, CancellationToken cancellationToken)

@@ -19,8 +19,10 @@ layout is written directly.
 - The control pipe is full duplex. Each side has one reader and serialized
   writes. It carries handshake, lifecycle, heartbeat, progress, errors, and
   future caption events.
-- The audio pipe is host-to-worker only. One host writer sends sequential
-  normalized frames and one worker reader validates them.
+- The audio pipe is temporarily full duplex for its authenticated binding.
+  After `AudioPipeHello`/`AudioPipeAccepted`, one host writer sends sequential
+  normalized frames and one worker reader validates them; no PCM is sent before
+  that acknowledgment.
 - Both pipe names are independent, cryptographically random, local names and
   allow one current-user client.
 - A fresh worker session creates fresh pipe names, session Guid, and 32-byte
@@ -31,8 +33,10 @@ layout is written directly.
 The host passes only control pipe name, audio pipe name, worker-session Guid,
 and parent PID in `ProcessStartInfo.ArgumentList`. The random nonce is passed in
 the private inherited `LIVE_CAPTIONS_ASR_NONCE` environment value and is never
-logged. `WorkerHello` binds both connected pipes to the expected session,
-nonce, and exact owned PID. The host does not search PATH or kill by process
+logged. `WorkerHello` authenticates the control connection and an independent
+`AudioPipeHello` proves the same session, nonce, and exact owned PID on the
+audio connection. The host sends neither audio nor the nonce to an
+unauthenticated audio client. The host does not search PATH or kill by process
 name.
 
 The owned worker is assigned to a Windows Job Object with
@@ -106,6 +110,8 @@ application-level meaning.
 | 14 | `Shutdown` | worker session Guid |
 | 15 | `ShutdownAcknowledged` | worker session Guid |
 | 16 | `CaptionEvent` | caption payload below |
+| 17 | `AudioPipeHello` | worker session Guid; nonce[32]; worker PID i32 |
+| 18 | `AudioPipeAccepted` | worker session Guid; worker PID i32 |
 | 100 | `AudioFrame` | exact audio payload below |
 
 The audio summary is: capture session Guid; frames received i64; PCM bytes
@@ -152,8 +158,10 @@ payload is:
 | 60 | 640 | immutable PCM bytes |
 
 The worker requires the active identities and lifecycle, strictly increasing
-sequences, nondecreasing sample indices with an exact 320-sample increment,
-valid timestamps, and exact payload length. It retains bounded statistics only;
+sequences and sample-index deltas of `sequence delta × 320`, nondecreasing
+timestamps, and exact payload length. A rejected candidate does not mutate
+accepted sequence, gap, byte, frame, sample-index, or timestamp state. It
+retains bounded statistics only;
 it does not retain unbounded audio or write WAV files.
 
 ## State machines and sequences
@@ -162,7 +170,8 @@ Handshake sequence:
 
 ```text
 connect both pipes
-→ WorkerHello
+→ WorkerHello + AudioPipeHello
+→ AudioPipeAccepted
 → HostAccept | HostReject
 → WorkerReady
 ```
@@ -196,6 +205,13 @@ is bounded; on timeout, only the owned process tree is terminated. Process exit,
 pipe loss, protocol rejection, heartbeat timeout, capture failure, audio-pump
 failure, forced-termination failure, and cleanup failure have typed managed
 failure kinds. Human-readable text supplements but never determines the kind.
+An unsolicited worker `Error` becomes `WorkerReportedError`; it is not folded
+into a generic protocol or pipe-closure result.
+The transport exposes one stored typed terminal completion. The first worker,
+pipe, protocol, heartbeat, reader, or writer failure invalidates the generation
+and starts one stored cleanup operation; stop, restart, disposal, and the
+pipeline join that same operation. Original failure type and every later
+cleanup failure remain separately diagnosable.
 
 The Stage 3 250-frame drop-oldest buffer remains the only PCM backpressure
 queue. The Stage 4 pump reads it directly and performs one sequential pipe
@@ -205,8 +221,10 @@ write per frame. It creates no second audio queue and no task per frame.
 
 Shared deterministic payload vectors are in
 `protocol/v1/test-vectors/protocol-v1.hex`. Both C# and C++ tests consume the
-same source-controlled file to lock field order, integer width, Guid order,
-timestamps, UTF-8, caption encoding, and the exact 700-byte audio frame.
+same source-controlled file to decode every field, encode the expected value,
+and compare every byte for all 12 vectors, including both audio-binding
+messages. This locks field order, integer width, Guid order, timestamps, UTF-8,
+caption encoding, and the exact 700-byte audio frame.
 
 ## Stage 4 limitations
 

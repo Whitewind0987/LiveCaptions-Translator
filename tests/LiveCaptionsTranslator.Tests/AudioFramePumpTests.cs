@@ -69,7 +69,8 @@ public sealed class AudioFramePumpTests
         public int FailAfter { get; init; } = int.MaxValue;
         public event EventHandler<AudioStreamSummaryPayload>? ProgressReceived { add { } remove { } }
         public event EventHandler<ErrorPayload>? ErrorReceived { add { } remove { } }
-        public long ControlMessagesSent => 0; public long ControlMessagesReceived => 0; public DateTimeOffset? LatestPongAtUtc => null;
+        public long ControlMessagesSent => 0; public long ControlMessagesReceived => 0; public long AudioFramesSent => Frames.Count; public long AudioBytesSent => Frames.Sum(frame => frame.Payload.Length); public DateTimeOffset? LatestPongAtUtc => null;
+        public Task<WorkerTransportFailure> TerminalFailure { get; } = new TaskCompletionSource<WorkerTransportFailure>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
         public Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task StartAudioStreamAsync(StartAudioStreamPayload request, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SendAudioFrameAsync(Guid workerSessionId, NormalizedAudioFrame frame, CancellationToken cancellationToken = default)

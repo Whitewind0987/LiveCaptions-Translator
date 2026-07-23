@@ -6,7 +6,7 @@
       "displayName": "Windows x64",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build/x64",
+      "binaryDir": "${sourceDir}/build/windows-x64",
       "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }
     },
     {

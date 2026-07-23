@@ -19,6 +19,7 @@ namespace LiveCaptionsTranslator.worker
         HeartbeatTimeout,
         ControlPipeClosed,
         AudioPipeClosed,
+        WorkerReportedError,
         WorkerExited,
         AudioCaptureFailed,
         AudioPumpFailed,
@@ -28,6 +29,14 @@ namespace LiveCaptionsTranslator.worker
     }
 
     public sealed record AsrWorkerStatus(AsrWorkerState State, AsrWorkerFailureKind FailureKind, string? FailureReason, DateTimeOffset ChangedAtUtc);
+
+    public sealed record WorkerTransportFailure(AsrWorkerFailureKind Kind, string Reason, Exception? Exception = null);
+
+    public sealed class WorkerTransportException : Exception
+    {
+        public WorkerTransportException(AsrWorkerFailureKind kind, string message, Exception? innerException = null) : base(message, innerException) => Kind = kind;
+        public AsrWorkerFailureKind Kind { get; }
+    }
 
     public sealed record AsrWorkerStartResult(bool Success, AsrWorkerState State, Guid? SessionId, int? ProcessId, AsrWorkerFailureKind FailureKind, string? FailureReason)
     {
@@ -54,6 +63,10 @@ namespace LiveCaptionsTranslator.worker
         long WorkerBytesReceived,
         long SequenceGaps,
         long WorkerInvalidFrames,
+        Guid? ActiveCaptureSessionId,
+        DateTimeOffset? LatestProgressAtUtc,
+        AsrWorkerFailureKind TransportFailureKind,
+        string? TransportFailureReason,
         int? ProcessExitCode,
         bool GracefulShutdownSucceeded,
         bool ForcedTerminationUsed,
@@ -61,7 +74,8 @@ namespace LiveCaptionsTranslator.worker
         IReadOnlyList<string> RecentStdout,
         IReadOnlyList<string> RecentStderr,
         AsrWorkerFailureKind FailureKind,
-        string? FailureReason);
+        string? FailureReason,
+        IReadOnlyList<string> CleanupFailures);
 
     public sealed record WorkerLaunchRequest(string ExecutablePath, string ControlPipeName, string AudioPipeName, Guid SessionId, int ParentPid, byte[] AuthenticationNonce);
 
@@ -89,7 +103,10 @@ namespace LiveCaptionsTranslator.worker
         event EventHandler<ErrorPayload>? ErrorReceived;
         long ControlMessagesSent { get; }
         long ControlMessagesReceived { get; }
+        long AudioFramesSent { get; }
+        long AudioBytesSent { get; }
         DateTimeOffset? LatestPongAtUtc { get; }
+        Task<WorkerTransportFailure> TerminalFailure { get; }
         Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default);
         Task StartAudioStreamAsync(StartAudioStreamPayload request, CancellationToken cancellationToken = default);
         Task SendAudioFrameAsync(Guid workerSessionId, audio.NormalizedAudioFrame frame, CancellationToken cancellationToken = default);

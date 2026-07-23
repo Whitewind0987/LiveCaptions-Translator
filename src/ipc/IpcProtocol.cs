@@ -42,6 +42,8 @@ namespace LiveCaptionsTranslator.ipc
         Shutdown = 14,
         ShutdownAcknowledged = 15,
         CaptionEvent = 16,
+        AudioPipeHello = 17,
+        AudioPipeAccepted = 18,
         AudioFrame = 100
     }
 

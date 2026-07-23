@@ -432,24 +432,29 @@ dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
 
 Current result:
 
-- 228 passed
+- 250 passed
 - 0 failed
 - 0 skipped
+- all existing 228 pre-hardening Stage 4 tests are preserved
 - all existing 193 Stage 3 tests are preserved
 - no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
 
 Stage 4 coverage includes fixed envelope layout, RFC 4122 Guid ordering, typed
 invalid-magic/version/type/size failures, optional unknown messages, fragmented
 reads, truncated payloads, strict payload codecs, exact 700-byte audio frames,
-caption-event mapping, and bidirectional shared golden vectors. In-process
-two-pipe tests cover valid handshake, nonce/PID rejection, bounded connection
-timeout, and cancellation. Fake process/job/transport tests cover one process
-per start, duplicate start, explicit restart with fresh identities, typed
-unexpected exit, missing executable, subscriber isolation, no status after
-stop, and retained Job assignment. Audio-pump tests cover ordering, bytes,
-identity, gaps, completion drain, cancellation, stale-session rejection, and
-pipe failure without a second backlog. A repeated 25-session Stage 3 regression
-proves completed publication dispatchers do not accumulate.
+caption-event mapping, and exact bidirectional shared golden vectors. In-process
+two-pipe tests cover independent control/audio authentication, wrong audio
+nonce/session/PID, second clients, no unauthenticated PCM exposure, distinct
+control/audio/ready timeouts, control closure, typed `WorkerReportedError`, unknown
+correlations, unexpected unsolicited messages, response identities, and
+concurrent cleanup. Fake process/job/transport tests cover generation-aware
+single terminal cleanup, immediate process/heartbeat/transport failure cleanup,
+real progress diagnostics, and synchronous reentrant Stop from Starting, Ready,
+Streaming, Faulted, Stopping, and Stopped notifications without deadlock or
+post-stop events. Pipeline tests cover continuously monitored pump failure,
+capture/worker failure cleanup, bounded pump joining, and final-summary
+validation. All earlier ordering, buffer, and repeated-session regressions are
+preserved.
 
 The normal xUnit suite uses fake processes/transports and in-process pipes. It
 does not launch the C++ worker, open WASAPI, start WPF, access the network, call
@@ -476,10 +481,12 @@ Results:
 - new native warnings: **0**
 - ARM64 preset is documented but was not built locally: **pending**
 
-Native coverage includes envelope round-trip, partial/truncated input rejection,
-invalid magic, unsupported major, oversized payload, RFC Guid bytes, bounded
-UTF-8, audio metadata, sequence/sample-index validation, gap accounting,
-stream statistics, and availability of all ten shared vectors.
+Native coverage includes fragmented envelope and payload input, invalid UTF-8,
+major/minor/flag validation, required/optional unknown types, independent
+sequence ordering, correlation and trailing-byte rejection, audio lifecycle,
+and candidate-before-commit stream statistics. Gap tests enforce `sequence
+delta * 320` sample-index movement and prove invalid frames leave all accepted
+statistics unchanged.
 
 Shared vectors are in:
 
@@ -487,10 +494,11 @@ Shared vectors are in:
 protocol/v1/test-vectors/protocol-v1.hex
 ```
 
-They cover `WorkerHello`, `HostAccept`, `WorkerReady`, `StartAudioStream`, one
-exact `AudioFrame`, `AudioProgress`, `Error`, `CaptionEvent`, `Shutdown`, and
-`ShutdownAcknowledged`. C# tests encode and decode every vector; C++ tests read
-the same fixture and validate the common primitive and state-machine rules.
+The 12 vectors cover `WorkerHello`, `AudioPipeHello`, `AudioPipeAccepted`,
+`HostAccept`, `WorkerReady`, `StartAudioStream`, one exact `AudioFrame`,
+`AudioProgress`, `Error`, `CaptionEvent`, `Shutdown`, and
+`ShutdownAcknowledged`. C# and C++ tests both decode every expected field,
+encode the expected value, and compare the exact bytes with the fixture.
 
 ## Stage 4 synthetic cross-process acceptance
 
@@ -500,40 +508,43 @@ The real x64 C++ worker was exercised through the developer probe on Windows
 Baseline synthetic command:
 
 ```powershell
-dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 2
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker native/AsrWorker/build/windows-x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 5
 ```
 
-Result: **passed**. The host launched one owned native process, connected both
-random pipes, authenticated, negotiated protocol 1.0 with only `ProtocolV1`
-and `NormalizedPcmSink`, sent 100 frames, and received a final 100-frame summary
-with 0 gaps and 0 heartbeat failures. Shutdown was acknowledged, worker exit
-code was 0, and no worker remained.
+Result: **passed**. The host launched one owned native process, authenticated
+both random pipes to the same session/nonce/PID, negotiated protocol 1.0 with
+only `ProtocolV1` and `NormalizedPcmSink`, sent 250 frames / 160,000 PCM bytes,
+and received a matching 250-frame summary with 0 gaps and 0 invalid frames. A
+real Pong was observed, shutdown was acknowledged, forced termination was not
+used, exit code was 0, cleanup failures were empty, and no worker remained.
 
 Explicit restart command:
 
 ```powershell
-dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 1 --restart
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker native/AsrWorker/build/windows-x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 3 --restart
 ```
 
 Result: **passed**. Exactly one explicit restart created a different worker
 session and different pipe identities. Across both sessions the probe generated
-100 frames and the workers reported 100 received, 0 gaps, 0 heartbeat failures,
-successful shutdown acknowledgment, and exit code 0. No automatic retry loop
-or orphan process was observed.
+200 frames and the workers reported 200 received, 0 gaps, 0 heartbeat failures,
+successful shutdown acknowledgment, no forced termination, exit code 0, and no
+cleanup failures. No automatic retry loop or orphan process was observed.
 
 Controlled-exit command:
 
 ```powershell
-dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 1 --controlled-exit
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker native/AsrWorker/build/windows-x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 3 --controlled-exit
 ```
 
 Result: **passed**. Terminating only the supervisor-owned worker became typed
-`WorkerExited`, did not hang, performed cleanup, and left no worker process.
+`WorkerExited`, completed the single stored cleanup without a pipe/job/process/
+monitor/disposal failure, did not require a cleanup-phase forced termination,
+did not hang, and left no worker process.
 
 Deterministic Ctrl+C-equivalent command:
 
 ```powershell
-dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 5 --cancel-after-ms 500
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker native/AsrWorker/build/windows-x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 30 --cancel-after-ms 1500
 ```
 
 Result: **passed** with exit code 0 and `Requested cancellation completed

@@ -9,10 +9,10 @@
   - Stage 0 environment and baseline verification
   - Stage 1 optional Windows Live Captions startup, verified on Windows 10
   - Stage 2A source-independent contracts and event-ordering core
-- Current status: Stage 2A is implemented and automatically tested; Stage 2 as
-  a whole is not complete
-- Next task: Stage 2B, adapt the existing Windows Live Captions implementation
-  to the Stage 2A contracts
+  - Stage 2B Windows Live Captions source adapter and production integration
+- Current status: Stage 2 implementation is complete pending final manual
+  runtime verification
+- Next stage after Stage 2 manual acceptance: Stage 3
 
 ## Environment
 
@@ -109,11 +109,31 @@ Stage 2A adds source-independent captioning foundations under `src/captioning/`:
   final events;
 - a focused `net8.0-windows` xUnit test project with 55 passing tests.
 
-The contracts are not integrated into `Translator`, application startup,
-`LiveCaptionsHandler`, UI, or runtime loops. Existing Stage 1 behavior is
-unchanged. Stage 2B will implement the Windows Live Captions adapter and runtime
-integration.
+## Stage 2B implementation
+
+Stage 2B integrates the source contracts into production:
+
+- `WindowsLiveCaptionsSource` implements `ICaptionSource` using a narrow typed
+  Windows runtime adapter over the existing low-level `LiveCaptionsHandler`;
+- `CaptionSourceHost` subscribes before startup, validates all events through
+  `CaptionEventGate`, and retains one thread-safe latest accepted snapshot;
+- `Translator` owns no UI Automation object and performs no direct
+  `LiveCaptionsHandler` calls;
+- `App` explicitly starts one production source and owns loop cancellation,
+  source stop, and asynchronous disposal during shutdown;
+- MainWindow and SettingPage use the optional typed native-window capability;
+- managed snapshot processing preserves the existing preprocessing,
+  sentence-extraction, idle, sync, translation-queue, display, and overlay
+  behavior;
+- a focused `net8.0-windows` xUnit suite now has 93 passing tests.
+
+Known transitional behavior: `WindowsLiveCaptionsSource` emits changed complete
+raw snapshots as `Partial` events only. It deliberately emits no `Committed` or
+`Final` event; the existing Translator commit and idle heuristics still decide
+when text enters the translation queue. Translation-version rejection remains a
+later-stage responsibility.
 
 Stage 1 remains complete on Windows 10. Windows 11 runtime behavior remains
-unverified and no Windows 11 checks are recorded as passed.
+unverified and no Windows 11 checks are recorded as passed. Stage 2B Windows 10
+and Windows 11 manual runtime verification is pending; Stage 3 has not begun.
 

@@ -1,9 +1,10 @@
-﻿using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
-using System.Text;
-using System.Windows.Automation;
 
 using LiveCaptionsTranslator.apis;
+using LiveCaptionsTranslator.captioning;
+using LiveCaptionsTranslator.captioning.windows;
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.utils;
 
@@ -11,201 +12,146 @@ namespace LiveCaptionsTranslator
 {
     public static class Translator
     {
-        private static AutomationElement? window = null;
-        private static Caption? caption = null;
-        private static Setting? setting = null;
+        private const string UnavailableSourceWarning = "[WARNING] No caption source is available.";
+        private const string RestartingSourceWarning =
+            "[WARNING] LiveCaptions was unexpectedly closed, restarting...";
 
-        private static readonly Queue<string> pendingTextQueue = new();
+        private static readonly ConcurrentQueue<string> pendingTextQueue = new();
         private static readonly TranslationTaskQueue translationTaskQueue = new();
+        private static readonly CaptionSourceHost captionSourceHost;
+        private static readonly Caption? caption;
+        private static readonly Setting? setting;
 
-        public static AutomationElement? Window
-        {
-            get => window;
-            set => window = value;
-        }
         public static Caption? Caption => caption;
         public static Setting? Setting => setting;
 
-        public static bool LogOnlyFlag { get; set; } = false;
-        public static bool FirstUseFlag { get; set; } = false;
-        public static bool CaptionSourceUnavailable { get; private set; } = false;
-        public static string? CaptionSourceFailureReason { get; private set; } = null;
+        public static bool LogOnlyFlag { get; set; }
+        public static bool FirstUseFlag { get; set; }
+        public static CaptionSourceState CaptionSourceState => captionSourceHost.State;
+        public static bool CaptionSourceUnavailable =>
+            CaptionSourceState is CaptionSourceState.Unavailable or CaptionSourceState.Faulted;
+        public static string? CaptionSourceFailureReason => captionSourceHost.FailureReason;
+        public static bool IsCaptionWindowAvailable =>
+            captionSourceHost.NativeWindowControl?.IsWindowAvailable == true;
+        public static bool? IsCaptionWindowVisible =>
+            captionSourceHost.NativeWindowControl?.IsWindowVisible;
 
         public static event Action? TranslationLogged;
 
-        public static void ApplyCaptionSourceUnavailableWarning()
-        {
-            const string warning = "[WARNING] No caption source is available.";
-            var currentCaption = Caption;
-
-            if (currentCaption == null)
-                return;
-
-            currentCaption.DisplayOriginalCaption = warning;
-            currentCaption.DisplayTranslatedCaption = warning;
-            currentCaption.OverlayOriginalCaption = warning;
-            currentCaption.OverlayNoticePrefix = string.Empty;
-            currentCaption.OverlayCurrentTranslation = warning;
-        }
-
         static Translator()
         {
-            TryInitializeCaptionSource();
-
             if (!File.Exists(Path.Combine(Directory.GetCurrentDirectory(), models.Setting.FILENAME)))
                 FirstUseFlag = true;
 
-            caption = Caption.GetInstance();
-            setting = Setting.Load();
+            caption = models.Caption.GetInstance();
+            setting = models.Setting.Load();
+
+            var source = new WindowsLiveCaptionsSource();
+            captionSourceHost = new CaptionSourceHost(source);
+            captionSourceHost.StatusChanged += OnCaptionSourceStatusChanged;
         }
 
-        public static void SyncLoop()
+        public static Task<CaptionSourceStartResult> StartCaptionSourceAsync(
+            CancellationToken cancellationToken = default) =>
+            captionSourceHost.StartAsync(cancellationToken);
+
+        public static Task StopCaptionSourceAsync(CancellationToken cancellationToken = default) =>
+            captionSourceHost.StopAsync(cancellationToken);
+
+        public static ValueTask DisposeCaptionSourceAsync() => captionSourceHost.DisposeAsync();
+
+        public static Task<CaptionWindowControlResult> ShowCaptionWindowAsync(
+            CancellationToken cancellationToken = default) =>
+            captionSourceHost.NativeWindowControl?.ShowAsync(cancellationToken) ??
+            Task.FromResult(CaptionWindowControlResult.Failed(
+                CaptionWindowControlFailure.Unavailable,
+                "The active caption source does not provide a native window."));
+
+        public static Task<CaptionWindowControlResult> HideCaptionWindowAsync(
+            CancellationToken cancellationToken = default) =>
+            captionSourceHost.NativeWindowControl?.HideAsync(cancellationToken) ??
+            Task.FromResult(CaptionWindowControlResult.Failed(
+                CaptionWindowControlFailure.Unavailable,
+                "The active caption source does not provide a native window."));
+
+        public static void ApplyCaptionSourceUnavailableWarning()
         {
-            int idleCount = 0;
-            int syncCount = 0;
+            Caption.DisplayOriginalCaption = UnavailableSourceWarning;
+            Caption.DisplayTranslatedCaption = UnavailableSourceWarning;
+            Caption.OverlayOriginalCaption = UnavailableSourceWarning;
+            Caption.OverlayNoticePrefix = string.Empty;
+            Caption.OverlayCurrentTranslation = UnavailableSourceWarning;
+        }
 
-            if (CaptionSourceUnavailable)
-                ApplyCaptionSourceUnavailableWarning();
+        public static async Task SyncLoop(CancellationToken cancellationToken = default)
+        {
+            var processor = new CaptionSnapshotProcessor();
 
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                if (Window == null)
+                var sourceState = captionSourceHost.ReadLatestState();
+                var result = processor.Tick(
+                    sourceState.SessionGeneration,
+                    sourceState.Snapshot?.Text,
+                    Caption.Contexts.Count,
+                    Setting.DisplaySentences,
+                    Setting.MaxSyncInterval,
+                    Setting.MaxIdleInterval);
+
+                if (result.SessionReset)
                 {
-                    Thread.Sleep(2000);
-                    continue;
+                    Caption.OriginalCaption = string.Empty;
+                    Caption.OverlayOriginalCaption = " ";
+                    if (!CaptionSourceUnavailable)
+                        Caption.DisplayOriginalCaption = string.Empty;
                 }
 
-                string fullText = string.Empty;
+                if (result.HasSnapshot)
+                {
+                    if (result.ClearContexts)
+                        ClearContexts();
+
+                    Caption.OverlayOriginalCaption = result.OverlayOriginalCaption!;
+                    if (!string.Equals(
+                            Caption.DisplayOriginalCaption,
+                            result.DisplayOriginalCaption,
+                            StringComparison.Ordinal))
+                    {
+                        Caption.DisplayOriginalCaption = result.DisplayOriginalCaption!;
+                    }
+                    if (!string.Equals(
+                            Caption.OriginalCaption,
+                            result.OriginalCaption,
+                            StringComparison.Ordinal))
+                    {
+                        Caption.OriginalCaption = result.OriginalCaption!;
+                    }
+
+                    if (!string.IsNullOrEmpty(result.TranslationTextToEnqueue))
+                        pendingTextQueue.Enqueue(result.TranslationTextToEnqueue);
+                }
+
                 try
                 {
-                    // Check LiveCaptions.exe still alive
-                    var info = Window.Current;
-                    var name = info.Name;
-                    // Get the text recognized by LiveCaptions (10-20ms)
-                    fullText = LiveCaptionsHandler.GetCaptions(Window);
+                    await Task.Delay(25, cancellationToken).ConfigureAwait(false);
                 }
-                catch (ElementNotAvailableException)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    Window = null;
-                    continue;
+                    break;
                 }
-                if (string.IsNullOrEmpty(fullText))
-                    continue;
-
-                // Preprocess
-                fullText = RegexPatterns.Acronym().Replace(fullText, "$1$2");
-                fullText = RegexPatterns.AcronymWithWords().Replace(fullText, "$1 $2");
-                fullText = RegexPatterns.PunctuationSpace().Replace(fullText, "$1 ");
-                fullText = RegexPatterns.CJPunctuationSpace().Replace(fullText, "$1");
-                // Note: For certain languages (such as Japanese), LiveCaptions excessively uses `\n`.
-                // Replace redundant `\n` within sentences with comma or period.
-                fullText = TextUtil.ReplaceNewlines(fullText, TextUtil.MEDIUM_THRESHOLD);
-
-                // Prevent adding the last sentence from previous running to log cards
-                // before the first sentence is completed.
-                if (fullText.IndexOfAny(TextUtil.PUNC_EOS) == -1 && Caption.Contexts.Count > 0)
-                    ClearContexts();
-
-                // Get the last sentence.
-                int lastEOSIndex;
-                if (Array.IndexOf(TextUtil.PUNC_EOS, fullText[^1]) != -1)
-                    lastEOSIndex = fullText[0..^1].LastIndexOfAny(TextUtil.PUNC_EOS);
-                else
-                    lastEOSIndex = fullText.LastIndexOfAny(TextUtil.PUNC_EOS);
-                string latestCaption = fullText.Substring(lastEOSIndex + 1);
-
-                // If the last sentence is too short, extend it by adding the previous sentence.
-                // Note: LiveCaptions may generate multiple characters including EOS at once.
-                if (lastEOSIndex > 0 && Encoding.UTF8.GetByteCount(latestCaption) < TextUtil.SHORT_THRESHOLD)
-                {
-                    lastEOSIndex = fullText[0..lastEOSIndex].LastIndexOfAny(TextUtil.PUNC_EOS);
-                    latestCaption = fullText.Substring(lastEOSIndex + 1);
-                }
-
-                // `OverlayOriginalCaption`: The sentence to be displayed on Overlay Window.
-                Caption.OverlayOriginalCaption = latestCaption;
-                for (int historyCount = Math.Min(Setting.DisplaySentences, Caption.Contexts.Count);
-                     historyCount > 0 && lastEOSIndex > 0;
-                     historyCount--)
-                {
-                    lastEOSIndex = fullText[0..lastEOSIndex].LastIndexOfAny(TextUtil.PUNC_EOS);
-                    Caption.OverlayOriginalCaption = fullText.Substring(lastEOSIndex + 1);
-                }
-
-                // `DisplayOriginalCaption`: The sentence to be displayed on Main Window.
-                if (string.CompareOrdinal(Caption.DisplayOriginalCaption, latestCaption) != 0)
-                {
-                    Caption.DisplayOriginalCaption = latestCaption;
-                    // If the last sentence is too long, truncate it when displayed.
-                    Caption.DisplayOriginalCaption =
-                        TextUtil.ShortenDisplaySentence(Caption.DisplayOriginalCaption, TextUtil.VERYLONG_THRESHOLD);
-                }
-
-                // Prepare for `OriginalCaption`. If Expanded, only retain the complete sentence.
-                int lastEOS = latestCaption.LastIndexOfAny(TextUtil.PUNC_EOS);
-                if (lastEOS != -1)
-                    latestCaption = latestCaption.Substring(0, lastEOS + 1);
-                // `OriginalCaption`: The sentence to be really translated.
-                if (string.CompareOrdinal(Caption.OriginalCaption, latestCaption) != 0)
-                {
-                    Caption.OriginalCaption = latestCaption;
-
-                    idleCount = 0;
-                    if (Array.IndexOf(TextUtil.PUNC_EOS, Caption.OriginalCaption[^1]) != -1)
-                    {
-                        syncCount = 0;
-                        pendingTextQueue.Enqueue(Caption.OriginalCaption);
-                    }
-                    else if (Encoding.UTF8.GetByteCount(Caption.OriginalCaption) >= TextUtil.SHORT_THRESHOLD)
-                        syncCount++;
-                }
-                else
-                    idleCount++;
-
-                // `TranslateFlag` determines whether this sentence should be translated.
-                // When `OriginalCaption` remains unchanged, `idleCount` +1; when `OriginalCaption` changes, `MaxSyncInterval` +1.
-                if (syncCount > Setting.MaxSyncInterval ||
-                    idleCount == Setting.MaxIdleInterval)
-                {
-                    syncCount = 0;
-                    pendingTextQueue.Enqueue(Caption.OriginalCaption);
-                }
-
-                Thread.Sleep(25);
             }
         }
 
-        public static async Task TranslateLoop()
+        public static async Task TranslateLoop(CancellationToken cancellationToken = default)
         {
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                if (Window == null)
+                if (pendingTextQueue.TryDequeue(out var originalSnapshot))
                 {
-                    if (CaptionSourceUnavailable)
-                    {
-                        Thread.Sleep(2000);
-                        continue;
-                    }
-
-                    Thread.Sleep(2000);
-                    Caption.DisplayTranslatedCaption = "[WARNING] LiveCaptions was unexpectedly closed, restarting...";
-                    if (TryInitializeCaptionSource())
-                        Caption.DisplayTranslatedCaption = "";
-                    else
-                    {
-                        ApplyCaptionSourceUnavailableWarning();
-                    }
-                }
-
-                // Translate
-                if (pendingTextQueue.Count > 0)
-                {
-                    var originalSnapshot = pendingTextQueue.Dequeue();
-
                     if (LogOnlyFlag)
                     {
-                        bool isOverwrite = await IsOverwrite(originalSnapshot);
-                        await LogOnly(originalSnapshot, isOverwrite);
+                        bool isOverwrite = await IsOverwrite(originalSnapshot, cancellationToken);
+                        await LogOnly(originalSnapshot, isOverwrite, cancellationToken);
                     }
                     else
                     {
@@ -214,32 +160,20 @@ namespace LiveCaptionsTranslator
                     }
                 }
 
-                Thread.Sleep(40);
+                try
+                {
+                    await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 
-        private static bool TryInitializeCaptionSource()
+        public static async Task DisplayLoop(CancellationToken cancellationToken = default)
         {
-            var (success, liveCaptionsWindow, errorMessage) =
-                LiveCaptionsHandler.TryInitializeLiveCaptions();
-
-            if (success && liveCaptionsWindow != null)
-            {
-                Window = liveCaptionsWindow;
-                CaptionSourceUnavailable = false;
-                CaptionSourceFailureReason = null;
-                return true;
-            }
-
-            Window = null;
-            CaptionSourceUnavailable = true;
-            CaptionSourceFailureReason = errorMessage ?? "Live Captions initialization failed without a reason.";
-            return false;
-        }
-
-        public static async Task DisplayLoop()
-        {
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 var (translatedText, isChoke) = translationTaskQueue.Output;
 
@@ -254,12 +188,10 @@ namespace LiveCaptionsTranslator
                              translatedText, string.Empty).Trim()) &&
                          string.CompareOrdinal(Caption.TranslatedCaption, translatedText) != 0)
                 {
-                    // Main page
                     Caption.TranslatedCaption = translatedText;
                     Caption.DisplayTranslatedCaption =
                         TextUtil.ShortenDisplaySentence(Caption.TranslatedCaption, TextUtil.VERYLONG_THRESHOLD);
 
-                    // Overlay window
                     if (Caption.TranslatedCaption.Contains("[ERROR]") || Caption.TranslatedCaption.Contains("[WARNING]"))
                         Caption.OverlayCurrentTranslation = Caption.TranslatedCaption;
                     else
@@ -270,11 +202,48 @@ namespace LiveCaptionsTranslator
                     }
                 }
 
-                // If the original sentence is a complete sentence, choke for better visual experience.
-                if (isChoke)
-                    Thread.Sleep(720);
-                Thread.Sleep(40);
+                try
+                {
+                    if (isChoke)
+                        await Task.Delay(720, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
+        }
+
+        private static void OnCaptionSourceStatusChanged(object? sender, CaptionSourceStatus status)
+        {
+            switch (status.State)
+            {
+                case CaptionSourceState.Running:
+                    ClearObsoleteSourceWarnings();
+                    break;
+                case CaptionSourceState.Restarting:
+                    Caption.DisplayTranslatedCaption = RestartingSourceWarning;
+                    Caption.OverlayNoticePrefix = string.Empty;
+                    Caption.OverlayCurrentTranslation = RestartingSourceWarning;
+                    break;
+                case CaptionSourceState.Unavailable:
+                case CaptionSourceState.Faulted:
+                    ApplyCaptionSourceUnavailableWarning();
+                    break;
+            }
+        }
+
+        private static void ClearObsoleteSourceWarnings()
+        {
+            if (Caption.DisplayOriginalCaption == UnavailableSourceWarning)
+                Caption.DisplayOriginalCaption = string.Empty;
+            if (Caption.DisplayTranslatedCaption is UnavailableSourceWarning or RestartingSourceWarning)
+                Caption.DisplayTranslatedCaption = string.Empty;
+            if (Caption.OverlayOriginalCaption == UnavailableSourceWarning)
+                Caption.OverlayOriginalCaption = " ";
+            if (Caption.OverlayCurrentTranslation is UnavailableSourceWarning or RestartingSourceWarning)
+                Caption.OverlayCurrentTranslation = " ";
         }
 
         public static async Task<(string, bool)> Translate(string text, CancellationToken token = default)
@@ -303,7 +272,7 @@ namespace LiveCaptionsTranslator
                     translatedText = $"[{sw.ElapsedMilliseconds,4} ms] " + translatedText;
                 }
             }
-            catch (OperationCanceledException ex)
+            catch (OperationCanceledException)
             {
                 throw;
             }
@@ -373,23 +342,22 @@ namespace LiveCaptionsTranslator
             if (lastLog == null)
                 return;
 
-            if (Caption?.Contexts.Count >= Caption.MAX_CONTEXTS)
+            if (Caption.Contexts.Count >= models.Caption.MAX_CONTEXTS)
                 Caption.Contexts.Dequeue();
-            Caption?.Contexts.Enqueue(lastLog);
+            Caption.Contexts.Enqueue(lastLog);
 
-            Caption?.OnPropertyChanged("DisplayLogCards");
-            Caption?.OnPropertyChanged("OverlayPreviousTranslation");
+            Caption.OnPropertyChanged("DisplayLogCards");
+            Caption.OnPropertyChanged("OverlayPreviousTranslation");
         }
 
         public static void ClearContexts()
         {
-            Caption?.Contexts.Clear();
+            Caption.Contexts.Clear();
 
-            Caption?.OnPropertyChanged("DisplayLogCards");
-            Caption?.OnPropertyChanged("OverlayPreviousTranslation");
+            Caption.OnPropertyChanged("DisplayLogCards");
+            Caption.OnPropertyChanged("OverlayPreviousTranslation");
         }
 
-        // If this text is too similar to the last one, overwrite it when logging.
         public static async Task<bool> IsOverwrite(string originalText, CancellationToken token = default)
         {
             string lastOriginalText = await SQLiteHistoryLogger.LoadLastSourceText(token);

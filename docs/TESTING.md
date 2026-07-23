@@ -128,9 +128,71 @@ local settings or history files.
 The main application project excludes `tests/**/*.cs` from its default recursive
 compile items. Test dependencies are referenced only by the test project.
 
-Stage 2A does not change runtime behavior. Stage 2B runtime integration and its
-manual tests are pending. Stage 1 remains verified on Windows 10; Windows 11
-runtime verification remains pending.
+Stage 2A itself did not change runtime behavior. Stage 2B integration is
+documented below. Stage 1 remains verified on Windows 10; final Stage 2B manual
+runtime verification remains pending on Windows 10 and Windows 11.
+
+## Stage 2B automated tests
+
+Command:
+
+```powershell
+dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
+```
+
+Result:
+
+- 93 passed
+- 0 failed
+- 0 skipped
+
+The final suite preserves all 55 Stage 2A tests and adds deterministic coverage
+for `WindowsLiveCaptionsSource`, typed initialization/read/cleanup outcomes,
+ordered Reset and changed-snapshot Partial events, duplicate starts, subscriber
+isolation, controlled restart, cancellation during restart, stop/disposal,
+cleanup diagnostics, optional native-window control, `CaptionSourceHost` gate
+integration, atomic latest snapshots, and managed legacy caption processing.
+
+All Stage 2B source tests use fake runtimes, fake delays, and fake caption
+sources. They do not launch `LiveCaptions.exe`, access real UI Automation,
+create visible WPF windows, call translation providers, use the network, or read
+local settings/history runtime files. The injected restart delay avoids a real
+two-second wait.
+
+## Stage 2B Windows 10 manual checklist
+
+All checks below are **pending** for the Stage 2B build. Existing Stage 1 Windows
+10 acceptance remains valid but is not treated as Stage 2B verification.
+
+- Application opens without `TypeInitializationException`: **pending**
+- Generic unavailable-source warning appears: **pending**
+- Settings opens: **pending**
+- History opens: **pending**
+- Overlay opens and closes: **pending**
+- Pause displays `[Paused]`: **pending**
+- Resume restores `[WARNING] No caption source is available.`: **pending**
+- Application remains open for at least two minutes: **pending**
+- No `LiveCaptions` process exists on Windows 10: **pending**
+- No repeated Live Captions launch attempts occur: **pending**
+- Application exits cleanly: **pending**
+- No `LiveCaptionsTranslator` process remains: **pending**
+
+## Stage 2B Windows 11 manual checklist
+
+All checks below are **pending** on Windows 11 with Windows Live Captions
+available.
+
+- Live Captions starts: **pending**
+- Native window is hidden: **pending**
+- Show/Hide setting works: **pending**
+- Captions reach the main window: **pending**
+- Captions reach the overlay: **pending**
+- Translation still occurs: **pending**
+- History still logs: **pending**
+- Unexpected Live Captions closure triggers one restart: **pending**
+- Restart creates a new source session: **pending**
+- Application exit restores and terminates the source-owned process: **pending**
+- No orphan process remains: **pending**
 
 ## Future fixed audio fixtures
 

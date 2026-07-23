@@ -32,25 +32,18 @@ namespace LiveCaptionsTranslator
             LoadAPISetting();
         }
 
-        private void LiveCaptionsButton_click(object sender, RoutedEventArgs e)
+        private async void LiveCaptionsButton_click(object sender, RoutedEventArgs e)
         {
-            if (Translator.Window == null)
+            var isVisible = Translator.IsCaptionWindowVisible;
+            if (!isVisible.HasValue)
                 return;
 
-            var button = sender as Wpf.Ui.Controls.Button;
-            var text = ButtonText.Text;
+            var result = isVisible.Value
+                ? await Translator.HideCaptionWindowAsync()
+                : await Translator.ShowCaptionWindowAsync();
 
-            bool isHide = Translator.Window.Current.BoundingRectangle == Rect.Empty;
-            if (isHide)
-            {
-                LiveCaptionsHandler.RestoreLiveCaptions(Translator.Window);
-                ButtonText.Text = "Hide";
-            }
-            else
-            {
-                LiveCaptionsHandler.HideLiveCaptions(Translator.Window);
-                ButtonText.Text = "Show";
-            }
+            if (result.Success)
+                ButtonText.Text = isVisible.Value ? "Show" : "Hide";
         }
 
         private void TranslateAPIBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -157,8 +150,9 @@ namespace LiveCaptionsTranslator
 
         private void CheckForFirstUse()
         {
-            if (Translator.FirstUseFlag && Translator.Window != null)
-                ButtonText.Text = "Hide";
+            var isVisible = Translator.IsCaptionWindowVisible;
+            if (isVisible.HasValue)
+                ButtonText.Text = isVisible.Value ? "Hide" : "Show";
         }
 
         public void LoadAPISetting()

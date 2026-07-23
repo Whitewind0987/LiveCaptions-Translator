@@ -20,13 +20,20 @@ namespace LiveCaptionsTranslator
             InitializeComponent();
             ApplicationThemeManager.ApplySystemTheme();
 
-            Loaded += (s, e) =>
+            Loaded += async (s, e) =>
             {
-                SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, true);
-                RootNavigation.Navigate(typeof(CaptionPage));
-                IsAutoHeight = true;
-                CheckForFirstUse();
-                CheckForUpdates();
+                try
+                {
+                    SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, true);
+                    RootNavigation.Navigate(typeof(CaptionPage));
+                    IsAutoHeight = true;
+                    await CheckForFirstUse();
+                    await CheckForUpdates();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Main-window startup flow failed: {ex}");
+                }
             };
 
             double screenWidth = SystemParameters.PrimaryScreenWidth;
@@ -113,7 +120,7 @@ namespace LiveCaptionsTranslator
                 Translator.LogOnlyFlag = false;
                 symbolIcon.Filled = false;
 
-                if (Translator.CaptionSourceUnavailable && Translator.Window == null)
+                if (Translator.CaptionSourceUnavailable)
                     Translator.ApplyCaptionSourceUnavailableWarning();
             }
             else
@@ -153,16 +160,16 @@ namespace LiveCaptionsTranslator
             Translator.Setting.MainWindow.Topmost = enabled;
         }
 
-        private void CheckForFirstUse()
+        private async Task CheckForFirstUse()
         {
             if (!Translator.FirstUseFlag)
                 return;
 
             RootNavigation.Navigate(typeof(SettingPage));
-            if (Translator.Window != null)
-                LiveCaptionsHandler.RestoreLiveCaptions(Translator.Window);
+            if (Translator.IsCaptionWindowAvailable)
+                await Translator.ShowCaptionWindowAsync();
 
-            Dispatcher.InvokeAsync(() =>
+            await Dispatcher.InvokeAsync(() =>
             {
                 var welcomeWindow = new WelcomeWindow
                 {

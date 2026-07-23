@@ -6,52 +6,93 @@ using LiveCaptionsTranslator.apis;
 
 namespace LiveCaptionsTranslator.utils
 {
+    internal enum LiveCaptionsInitializationFailureCategory
+    {
+        Unavailable,
+        Faulted
+    }
+
+    internal sealed record LiveCaptionsInitializationResult(
+        bool Success,
+        AutomationElement? Window,
+        int? ProcessId,
+        LiveCaptionsInitializationFailureCategory? FailureCategory,
+        string? ErrorMessage);
+
     public static class LiveCaptionsHandler
     {
         public static readonly string PROCESS_NAME = "LiveCaptions";
 
         private static AutomationElement? captionsTextBlock = null;
 
-        public static (bool Success, AutomationElement? Window, string? ErrorMessage) TryInitializeLiveCaptions()
+        internal static LiveCaptionsInitializationResult TryInitializeLiveCaptions(
+            CancellationToken cancellationToken = default)
         {
             Process? startedProcess = null;
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                captionsTextBlock = null;
                 KillAllProcessesByPName(PROCESS_NAME);
+                cancellationToken.ThrowIfCancellationRequested();
                 startedProcess = Process.Start(PROCESS_NAME);
                 if (startedProcess == null)
-                    return CreateInitializationFailure(null, "Failed to start LiveCaptions process.");
+                {
+                    return CreateInitializationFailure(
+                        null,
+                        LiveCaptionsInitializationFailureCategory.Faulted,
+                        "Failed to start LiveCaptions process.");
+                }
 
                 AutomationElement? window = null;
                 for (int attemptCount = 0;
                      window == null || window.Current.ClassName.CompareTo("LiveCaptionsDesktopWindow") != 0;
                      attemptCount++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     window = FindWindowByPId(startedProcess.Id);
                     if (attemptCount > 10000)
+                    {
                         return CreateInitializationFailure(
-                            startedProcess, "Failed to find LiveCaptions window after launching.");
+                            startedProcess,
+                            LiveCaptionsInitializationFailureCategory.Faulted,
+                            "Failed to find LiveCaptions window after launching.");
+                    }
                 }
 
                 FixLiveCaptions(window);
                 HideLiveCaptions(window);
-                return (true, window, null);
+                return new LiveCaptionsInitializationResult(
+                    true, window, startedProcess.Id, null, null);
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == 2)
             {
                 return CreateInitializationFailure(
-                    startedProcess, "LiveCaptions.exe is not available on this system.");
+                    startedProcess,
+                    LiveCaptionsInitializationFailureCategory.Unavailable,
+                    "LiveCaptions.exe is not available on this system.");
             }
             catch (Win32Exception ex)
             {
                 return CreateInitializationFailure(
-                    startedProcess, $"Failed to initialize LiveCaptions: {ex.Message}");
+                    startedProcess,
+                    LiveCaptionsInitializationFailureCategory.Faulted,
+                    $"Failed to initialize LiveCaptions: {ex.Message}");
+            }
+            catch (OperationCanceledException)
+            {
+                var cleanupError = TryTerminateStartedProcess(startedProcess);
+                if (!string.IsNullOrWhiteSpace(cleanupError))
+                    Debug.WriteLine(cleanupError);
+                throw;
             }
             catch (Exception ex)
             {
                 return CreateInitializationFailure(
-                    startedProcess, $"Failed to initialize LiveCaptions: {ex.Message}");
+                    startedProcess,
+                    LiveCaptionsInitializationFailureCategory.Faulted,
+                    $"Failed to initialize LiveCaptions: {ex.Message}");
             }
             finally
             {
@@ -66,22 +107,17 @@ namespace LiveCaptionsTranslator.utils
             }
         }
 
-        public static AutomationElement LaunchLiveCaptions()
-        {
-            var (success, window, errorMessage) = TryInitializeLiveCaptions();
-            if (!success)
-                throw new Exception(errorMessage ?? "Failed to initialize LiveCaptions!");
-            return window!;
-        }
-
-        private static (bool Success, AutomationElement? Window, string ErrorMessage)
-            CreateInitializationFailure(Process? startedProcess, string errorMessage)
+        private static LiveCaptionsInitializationResult CreateInitializationFailure(
+            Process? startedProcess,
+            LiveCaptionsInitializationFailureCategory failureCategory,
+            string errorMessage)
         {
             var cleanupError = TryTerminateStartedProcess(startedProcess);
             if (!string.IsNullOrEmpty(cleanupError))
                 errorMessage = $"{errorMessage} {cleanupError}";
 
-            return (false, null, errorMessage);
+            return new LiveCaptionsInitializationResult(
+                false, null, null, failureCategory, errorMessage);
         }
 
         private static string? TryTerminateStartedProcess(Process? startedProcess)
@@ -106,16 +142,62 @@ namespace LiveCaptionsTranslator.utils
             return null;
         }
 
-        public static void KillLiveCaptions(AutomationElement window)
+        internal static string? TryRestoreAndTerminate(
+            AutomationElement? window,
+            int? processId)
         {
-            // Search for process
-            nint hWnd = new nint((long)window.Current.NativeWindowHandle);
-            WindowsAPI.GetWindowThreadProcessId(hWnd, out int processId);
-            var process = Process.GetProcessById(processId);
+            var failures = new List<string>();
 
-            // Kill process
-            process.Kill();
-            process.WaitForExit();
+            if (window != null)
+            {
+                try
+                {
+                    RestoreLiveCaptions(window);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"Failed to restore the Live Captions window: {ex.Message}");
+                }
+
+                if (!processId.HasValue)
+                {
+                    try
+                    {
+                        nint hWnd = new((long)window.Current.NativeWindowHandle);
+                        WindowsAPI.GetWindowThreadProcessId(hWnd, out int discoveredProcessId);
+                        processId = discoveredProcessId;
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add($"Failed to identify the Live Captions process: {ex.Message}");
+                    }
+                }
+            }
+
+            if (processId.HasValue)
+            {
+                try
+                {
+                    using var process = Process.GetProcessById(processId.Value);
+                    if (!process.HasExited)
+                    {
+                        process.Kill();
+                        if (!process.WaitForExit(2000))
+                            failures.Add("Timed out while terminating the Live Captions process.");
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // The source-owned process has already exited.
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"Failed to terminate the Live Captions process: {ex.Message}");
+                }
+            }
+
+            captionsTextBlock = null;
+            return failures.Count == 0 ? null : string.Join(" ", failures);
         }
 
         public static void HideLiveCaptions(AutomationElement window)
@@ -171,7 +253,7 @@ namespace LiveCaptionsTranslator.utils
             }
         }
 
-        private static AutomationElement FindWindowByPId(int processId)
+        private static AutomationElement? FindWindowByPId(int processId)
         {
             var condition = new PropertyCondition(AutomationElement.ProcessIdProperty, processId);
             return AutomationElement.RootElement.FindFirst(TreeScope.Children, condition);

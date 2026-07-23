@@ -4,7 +4,8 @@
 
 This document records the planned architecture for the Windows 10/11-compatible
 fork. Stage 2A implements the source-independent caption contracts and ordering
-core described below. Runtime integration remains pending Stage 2B.
+core. Stage 2B implements the Windows Live Captions source adapter and integrates
+those contracts into the production runtime.
 
 ## Objective
 
@@ -172,9 +173,57 @@ predictably; stop is safe when already stopped; no event is emitted after stop
 completes; every successful start or restart creates a new session whose first
 event is `Reset` sequence 1.
 
-Stage 2A does not adapt Windows Live Captions or change application runtime
-behavior. Stage 2B will integrate the existing Windows Live Captions path with
-these contracts.
+## Stage 2B Windows Live Captions adapter
+
+The production flow is:
+
+```text
+App lifecycle
+→ Translator caption-source lifecycle
+→ CaptionSourceHost
+→ ICaptionSource
+→ WindowsLiveCaptionsSource
+→ ILiveCaptionsRuntime
+→ LiveCaptionsRuntime
+→ LiveCaptionsHandler
+```
+
+`Translator` constructs exactly one `WindowsLiveCaptionsSource` without native
+side effects. `App` explicitly starts the source before starting the three
+Translator loops, and cancels the loops, stops the source, and disposes its
+runtime during application exit. `CaptionSourceHost` subscribes before startup,
+passes every event through `CaptionEventGate`, and stores only one lock-protected
+latest accepted full-snapshot value. Rejected, stale, duplicate, and foreign-
+session events cannot replace that value.
+
+`LiveCaptionsRuntime` is the narrow Windows-specific boundary. It privately owns
+the UI Automation window and source-owned process identity and delegates the
+existing low-level launch, repair, hide, caption read, restore, and termination
+operations to `LiveCaptionsHandler`. Initialization, snapshot reads, cleanup,
+and native-window control use typed outcomes; failure classification never
+depends on parsing diagnostic strings. Only this adapter and the low-level
+handler use `AutomationElement`.
+
+On every successful start or controlled restart,
+`WindowsLiveCaptionsSource` creates a new session and first emits `Reset`
+sequence 1. It polls at approximately 25 ms and emits a `Partial` event only
+when the complete, non-empty raw Windows Live Captions snapshot changes. All
+Partials use segment 1, with sequence and revision increasing together. The
+Windows adapter deliberately does not invent `Committed` or `Final` events;
+Translator retains its existing punctuation, sentence extraction, sync-count,
+idle-count, and translation-queue commit heuristics.
+
+Unexpected native-window loss publishes `Restarting`, waits approximately two
+seconds, and performs one controlled initialization attempt. A successful
+attempt starts a new session; a failed attempt becomes `Unavailable` or
+`Faulted` and stops polling. Stop cancellation interrupts the restart delay and
+prevents later initialization or events.
+
+Native window show/hide support is exposed separately through the optional
+`INativeCaptionWindowControl` capability. It contains no UI Automation types and
+returns typed results for normal unavailability and control failures. Translator
+and UI code depend only on this optional capability and no longer access
+`AutomationElement` or `LiveCaptionsHandler` directly.
 
 ## Translation pipeline
 

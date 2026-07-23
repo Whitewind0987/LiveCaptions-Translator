@@ -7,8 +7,8 @@ namespace LiveCaptionsTranslator.audio.buffering
         public const int DefaultCapacity = 250;
 
         private readonly Queue<NormalizedAudioFrame> frames = [];
-        private readonly SemaphoreSlim available = new(0);
         private readonly object stateLock = new();
+        private TaskCompletionSource stateChanged = CreateSignal();
         private bool completed;
         private long droppedCount;
         private long consumedCount;
@@ -40,12 +40,8 @@ namespace LiveCaptionsTranslator.audio.buffering
                     frames.Dequeue();
                     droppedCount++;
                 }
-                else
-                {
-                    available.Release();
-                }
-
                 frames.Enqueue(frame);
+                SignalStateChanged();
                 return true;
             }
         }
@@ -62,7 +58,6 @@ namespace LiveCaptionsTranslator.audio.buffering
 
                 frame = frames.Dequeue();
                 consumedCount++;
-                _ = available.Wait(0);
                 return true;
             }
         }
@@ -72,7 +67,7 @@ namespace LiveCaptionsTranslator.audio.buffering
         {
             while (true)
             {
-                await available.WaitAsync(cancellationToken).ConfigureAwait(false);
+                Task waitForChange;
                 lock (stateLock)
                 {
                     if (frames.Count > 0)
@@ -83,7 +78,9 @@ namespace LiveCaptionsTranslator.audio.buffering
                     }
                     if (completed || disposed)
                         throw new ChannelClosedException();
+                    waitForChange = stateChanged.Task;
                 }
+                await waitForChange.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -94,7 +91,7 @@ namespace LiveCaptionsTranslator.audio.buffering
                 if (completed)
                     return;
                 completed = true;
-                available.Release();
+                SignalStateChanged();
             }
         }
 
@@ -107,8 +104,18 @@ namespace LiveCaptionsTranslator.audio.buffering
                 disposed = true;
                 completed = true;
                 frames.Clear();
-                available.Release();
+                SignalStateChanged();
             }
+        }
+
+        private static TaskCompletionSource CreateSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private void SignalStateChanged()
+        {
+            var signal = stateChanged;
+            stateChanged = CreateSignal();
+            signal.TrySetResult();
         }
     }
 }

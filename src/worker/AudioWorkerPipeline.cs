@@ -4,7 +4,11 @@ using LiveCaptionsTranslator.ipc;
 namespace LiveCaptionsTranslator.worker
 {
     public enum AudioWorkerPipelineState { Stopped, Starting, Streaming, Stopping, Faulted }
-    public sealed record AudioWorkerPipelineDiagnostics(AudioWorkerPipelineState State, AudioCaptureDiagnostics Capture, AudioFramePumpDiagnostics? Pump, AudioStreamSummaryPayload? WorkerSummary, AsrWorkerFailureKind FailureKind, string? FailureReason, IReadOnlyList<string> CleanupFailures);
+    public sealed record AudioWorkerPipelineDiagnostics(AudioWorkerPipelineState State, AudioCaptureDiagnostics Capture, AudioFramePumpDiagnostics? Pump, bool PumpJoined, AudioStreamSummaryPayload? WorkerSummary, AsrWorkerFailureKind FailureKind, string? FailureReason, IReadOnlyList<string> CleanupFailures);
+    internal sealed record AudioPumpDrainOptions(TimeSpan StallTimeout, TimeSpan OverallTimeout, TimeSpan PollInterval)
+    {
+        public static AudioPumpDrainOptions Default { get; } = new(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMilliseconds(100));
+    }
 
     public sealed class AudioWorkerPipeline : IAsyncDisposable
     {
@@ -12,12 +16,15 @@ namespace LiveCaptionsTranslator.worker
         private readonly AsrWorkerSupervisor supervisor;
         private readonly SemaphoreSlim lifecycle = new(1, 1);
         private readonly object stateLock = new();
+        private readonly AudioPumpDrainOptions drainOptions;
+        private readonly Func<Task>? captureStopOverride;
         private CancellationTokenSource? sessionCancellation;
         private AudioFramePump? pump;
         private Task? pumpTask;
         private Task? pumpMonitorTask;
         private Task? terminalCleanupTask;
         private AudioFramePumpDiagnostics? lastPumpDiagnostics;
+        private bool pumpJoined;
         private Guid captureSessionId;
         private AudioStreamSummaryPayload? summary;
         private AsrWorkerFailureKind failureKind;
@@ -27,9 +34,20 @@ namespace LiveCaptionsTranslator.worker
         private bool disposed;
 
         public AudioWorkerPipeline(AudioCaptureService capture, AsrWorkerSupervisor supervisor)
+            : this(capture, supervisor, AudioPumpDrainOptions.Default, null)
+        {
+        }
+
+        internal AudioWorkerPipeline(
+            AudioCaptureService capture,
+            AsrWorkerSupervisor supervisor,
+            AudioPumpDrainOptions drainOptions,
+            Func<Task>? captureStopOverride)
         {
             this.capture = capture ?? throw new ArgumentNullException(nameof(capture));
             this.supervisor = supervisor ?? throw new ArgumentNullException(nameof(supervisor));
+            this.drainOptions = drainOptions ?? throw new ArgumentNullException(nameof(drainOptions));
+            this.captureStopOverride = captureStopOverride;
             capture.StatusChanged += OnCaptureStatusChanged;
             supervisor.StatusChanged += OnWorkerStatusChanged;
         }
@@ -37,7 +55,7 @@ namespace LiveCaptionsTranslator.worker
         public AudioWorkerPipelineState State { get { lock (stateLock) return state; } }
         public AudioWorkerPipelineDiagnostics Diagnostics
         {
-            get { lock (stateLock) return new(state, capture.Diagnostics, pump?.Diagnostics ?? lastPumpDiagnostics, summary, failureKind, failureReason, cleanupFailures.ToArray()); }
+            get { lock (stateLock) return new(state, capture.Diagnostics, pump?.Diagnostics ?? lastPumpDiagnostics, pumpJoined, summary, failureKind, failureReason, cleanupFailures.ToArray()); }
         }
 
         public async Task StartAsync(string? endpointId = null, CancellationToken cancellationToken = default)
@@ -50,7 +68,7 @@ namespace LiveCaptionsTranslator.worker
                 if (state == AudioWorkerPipelineState.Streaming) return;
                 if (terminalCleanupTask is { IsCompleted: false }) throw new InvalidOperationException("Pipeline cleanup is still in progress.");
                 state = AudioWorkerPipelineState.Starting;
-                summary = null; lastPumpDiagnostics = null; failureKind = AsrWorkerFailureKind.None; failureReason = null; cleanupFailures.Clear(); captureSessionId = Guid.Empty;
+                summary = null; lastPumpDiagnostics = null; pumpJoined = false; failureKind = AsrWorkerFailureKind.None; failureReason = null; cleanupFailures.Clear(); captureSessionId = Guid.Empty;
                 var worker = await supervisor.StartAsync(cancellationToken).ConfigureAwait(false);
                 if (!worker.Success) throw new WorkerTransportException(worker.FailureKind, worker.FailureReason ?? "Worker failed to start.");
                 var captureResult = await capture.StartAsync(endpointId, cancellationToken).ConfigureAwait(false);
@@ -83,7 +101,7 @@ namespace LiveCaptionsTranslator.worker
         public async Task StopAsync(CancellationToken cancellationToken = default)
         {
             Task cleanup;
-            await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await lifecycle.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
                 if (state == AudioWorkerPipelineState.Stopped) return;
@@ -129,27 +147,37 @@ namespace LiveCaptionsTranslator.worker
         {
             await lifecycle.WaitAsync().ConfigureAwait(false);
             var failures = new List<string>();
+            var pumpDrainedNormally = pumpTask == null;
             try
             {
-                if (!normalStop) sessionCancellation?.Cancel();
-                try { await capture.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch (Exception ex) { failures.Add($"Capture stop failed: {ex.Message}"); }
+                if (!normalStop) RequestPumpCancellation(originalReason ?? "Terminal pipeline cleanup requested pump cancellation.");
+                try
+                {
+                    if (captureStopOverride != null) await captureStopOverride().ConfigureAwait(false);
+                    else await capture.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) { failures.Add($"Capture stop failed: {ex.Message}"); }
 
                 if (pumpTask != null)
                 {
-                    try { await pumpTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
-                    catch (TimeoutException)
+                    var drain = await DrainPumpAsync(pumpTask, normalStop).ConfigureAwait(false);
+                    pumpJoined = pumpTask.IsCompleted;
+                    pumpDrainedNormally = drain.CompletedNormally;
+                    if (!drain.CompletedNormally)
                     {
-                        sessionCancellation?.Cancel();
-                        try { await pumpTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
-                        catch (Exception ex) { failures.Add($"Pump cancellation/join failed: {ex.Message}"); }
+                        if (originalKind == AsrWorkerFailureKind.None)
+                        {
+                            originalKind = drain.FailureKind;
+                            originalReason = drain.FailureReason;
+                        }
+                        if (!string.IsNullOrWhiteSpace(drain.CleanupFailure))
+                            failures.Add(drain.CleanupFailure);
                     }
-                    catch (OperationCanceledException) when (!normalStop) { }
-                    catch (Exception ex) { failures.Add($"Pump failed: {ex.Message}"); }
                 }
 
                 lastPumpDiagnostics = pump?.Diagnostics;
                 var transport = supervisor.ActiveTransport;
-                if (normalStop && failures.Count == 0 && transport != null && supervisor.SessionId != null && captureSessionId != Guid.Empty)
+                if (normalStop && pumpDrainedNormally && failures.Count == 0 && transport != null && supervisor.SessionId != null && captureSessionId != Guid.Empty)
                 {
                     try
                     {
@@ -195,6 +223,89 @@ namespace LiveCaptionsTranslator.worker
             finally { lifecycle.Release(); }
         }
 
+        private async Task<PumpDrainResult> DrainPumpAsync(Task ownedPump, bool normalStop)
+        {
+            if (!normalStop)
+            {
+                try { await ownedPump.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (sessionCancellation?.IsCancellationRequested == true) { }
+                catch (Exception ex)
+                {
+                    var kind = ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
+                    return new(false, kind, ex.Message, $"Pump failed: {ex.Message}");
+                }
+                return new(false, AsrWorkerFailureKind.AudioPumpFailed, "Audio pump was canceled during terminal cleanup.", null);
+            }
+
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var lastProgressAt = started.Elapsed;
+            var diagnostics = pump?.Diagnostics;
+            var lastFrames = diagnostics?.FramesSent ?? 0;
+            var lastBytes = diagnostics?.BytesSent ?? 0;
+
+            while (!ownedPump.IsCompleted)
+            {
+                var remainingOverall = drainOptions.OverallTimeout - started.Elapsed;
+                var remainingStall = drainOptions.StallTimeout - (started.Elapsed - lastProgressAt);
+                if (remainingOverall <= TimeSpan.Zero || remainingStall <= TimeSpan.Zero)
+                    break;
+
+                var delay = new[] { drainOptions.PollInterval, remainingOverall, remainingStall }.Min();
+                await Task.WhenAny(ownedPump, Task.Delay(delay, CancellationToken.None)).ConfigureAwait(false);
+                diagnostics = pump?.Diagnostics;
+                if (diagnostics != null && (diagnostics.FramesSent > lastFrames || diagnostics.BytesSent > lastBytes))
+                {
+                    lastFrames = diagnostics.FramesSent;
+                    lastBytes = diagnostics.BytesSent;
+                    lastProgressAt = started.Elapsed;
+                }
+            }
+
+            if (ownedPump.IsCompleted)
+            {
+                try
+                {
+                    await ownedPump.ConfigureAwait(false);
+                    diagnostics = pump?.Diagnostics;
+                    if (diagnostics?.Phase == AudioFramePumpPhase.Completed && diagnostics.SourceCompletionObserved)
+                        return new(true, AsrWorkerFailureKind.None, null, null);
+                    var incomplete = $"Audio pump ended without observing source completion (phase {diagnostics?.Phase}).";
+                    return new(false, AsrWorkerFailureKind.AudioPumpFailed, incomplete, null);
+                }
+                catch (Exception ex)
+                {
+                    var kind = ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
+                    return new(false, kind, ex.Message, null);
+                }
+            }
+
+            diagnostics = pump?.Diagnostics;
+            var timedOutOverall = started.Elapsed >= drainOptions.OverallTimeout;
+            var reason = diagnostics?.Phase switch
+            {
+                AudioFramePumpPhase.WaitingForFrame =>
+                    $"Audio pump stalled waiting for source completion after capture stop ({(timedOutOverall ? "overall" : "progress")} timeout).",
+                AudioFramePumpPhase.WritingFrame =>
+                    $"Audio pump stalled writing frame {diagnostics.CurrentSequence?.ToString() ?? "unknown"} to the worker ({(timedOutOverall ? "overall" : "progress")} timeout).",
+                _ => $"Audio pump stalled in phase {diagnostics?.Phase.ToString() ?? "unknown"} ({(timedOutOverall ? "overall" : "progress")} timeout)."
+            };
+
+            RequestPumpCancellation(reason);
+            try { await ownedPump.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (sessionCancellation?.IsCancellationRequested == true) { }
+            catch (Exception ex) { return new(false, AsrWorkerFailureKind.AudioPumpFailed, reason, $"{reason} Pump join failed: {ex.Message}"); }
+            return new(false, AsrWorkerFailureKind.AudioPumpFailed, reason, null);
+        }
+
+        private sealed record PumpDrainResult(bool CompletedNormally, AsrWorkerFailureKind FailureKind, string? FailureReason, string? CleanupFailure);
+
+        private void RequestPumpCancellation(string reason)
+        {
+            if (pumpTask is { IsCompleted: false })
+                pump?.MarkOwnedCancellationRequested(reason);
+            sessionCancellation?.Cancel();
+        }
+
         private static void ValidateSummary(AudioStreamSummaryPayload value, AudioFramePumpDiagnostics pumpDiagnostics)
         {
             if (value.FramesReceived != pumpDiagnostics.FramesSent || value.PcmBytesReceived != pumpDiagnostics.BytesSent)
@@ -219,7 +330,7 @@ namespace LiveCaptionsTranslator.worker
         {
             if (status.State is AsrWorkerState.Faulted or AsrWorkerState.Unavailable)
             {
-                sessionCancellation?.Cancel();
+                RequestPumpCancellation(status.FailureReason ?? "Worker terminal state requested pump cancellation.");
                 BeginTerminalCleanup(status.FailureKind, status.FailureReason ?? "Worker failed.", normalStop: false);
             }
         }
@@ -228,7 +339,7 @@ namespace LiveCaptionsTranslator.worker
         {
             if (State == AudioWorkerPipelineState.Streaming && (status.State is AudioCaptureState.Faulted or AudioCaptureState.Unavailable))
             {
-                sessionCancellation?.Cancel();
+                RequestPumpCancellation(status.FailureReason ?? "Capture terminal state requested pump cancellation.");
                 BeginTerminalCleanup(AsrWorkerFailureKind.AudioCaptureFailed, status.FailureReason ?? "Audio capture failed.", normalStop: false);
             }
         }

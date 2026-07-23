@@ -432,10 +432,10 @@ dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
 
 Current result:
 
-- 262 passed
+- 275 passed
 - 0 failed
 - 0 skipped
-- all existing 250 tests from the previous Stage 4 baseline are preserved
+- all existing 262 tests from before the normal-stop hardening are preserved
 - all existing 193 Stage 3 tests are preserved
 - no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
 
@@ -454,10 +454,18 @@ process/heartbeat/transport monitor origins, immediate failure cleanup,
 real progress diagnostics, and synchronous reentrant Stop from Starting, Ready,
 Streaming, Faulted, Stopping, and Stopped notifications without deadlock or
 post-stop events, stale Ready suppression after subscriber A synchronously stops
-before subscriber B, and repeat-safe supervisor disposal. Pipeline tests cover continuously monitored pump failure,
-capture/worker failure cleanup, bounded pump joining, and final-summary
+before subscriber B, and repeat-safe supervisor disposal. Buffer tests prove
+deterministic completion after an empty blocked read, one/many/full 250-frame
+queues, drop-oldest activity, concurrent completion/final read, and repeated
+completion, with no blocked consumer after drain. Pump diagnostics tests cover
+normal completion, source-completion observation, current/last sequence, and
+owned cancellation. Pipeline tests cover continuously monitored pump failure,
+capture/worker failure cleanup, progress-bounded normal drain, typed source-
+completion and transport-write stalls, cancellation/join without a false
+`cancellation/join failed`, caller cancellation during mandatory cleanup, and final-summary
 validation, typed root-cause retention, `AudioStreamEnd` ordering, and matching
-end/summary totals. Initial-gap tests count sequence 2/3 drops before the first
+end/summary totals. Incomplete drains send neither `AudioStreamEnd` nor
+`StopAudioStream`, and every stop path proves the pump joined. Initial-gap tests count sequence 2/3 drops before the first
 sent frame. All earlier ordering, buffer, and repeated-session regressions are
 preserved.
 
@@ -586,24 +594,32 @@ committed.
 
 ## Stage 4 Windows 10 real-audio manual checklist
 
-Automated synthetic IPC passed, but the following real-system-audio checks are
-**pending**:
+The default-device normal-stop path was rerun on Windows 10 on 2026-07-24 with
+the previously verified audible Stage 3 WAV played through the selected output.
+The final result was 500 capture frames produced/consumed, 0 buffered, 0 dropped,
+500 pump and transport frames, 320,000 PCM bytes, and a matching 500-frame worker
+summary with 0 gaps and 0 invalid frames. The pump phase was `Completed`, source
+completion was observed, `PumpJoined` was true, owned cancellation was false,
+heartbeat failures were 0, shutdown was acknowledged, forced termination was
+false, exit code was 0, and both pipeline and worker failures/cleanup failures
+were empty. No `LiveCaptionsAsrWorker` or `LiveCaptionsTranslator` process
+remained after validation.
 
-- Native worker executable starts from the explicit path: **pending**
-- Both random pipes connect and authenticated handshake succeeds: **pending**
-- Heartbeat remains healthy during real capture: **pending**
-- Real Stage 3 default-device audio streams for ten seconds: **pending**
-- Capture frames sent approximately match worker frames received: **pending**
-- No unexpected sequence gaps occur: **pending**
-- Stage 3 bounded-buffer drops remain controlled: **pending**
-- `AudioStreamStopped` summary matches host diagnostics: **pending**
+- Native worker executable starts from the explicit path: **passed**
+- Both random pipes connect and authenticated handshake succeeds: **passed**
+- Heartbeat remains healthy during real capture: **passed**
+- Real Stage 3 default-device audio streams for ten seconds: **passed**
+- Capture frames sent match worker frames received: **passed** (500 / 500)
+- No unexpected sequence gaps occur: **passed** (0)
+- Stage 3 bounded-buffer drops remain controlled: **passed** (0)
+- `AudioStreamStopped` summary matches host diagnostics: **passed**
 - Interactive Ctrl+C shuts down capture, pump, pipes, and worker: **pending**
-- No `LiveCaptionsAsrWorker` process remains: **pending**
+- No `LiveCaptionsAsrWorker` process remains: **passed**
 - Controlled worker termination during real capture becomes a typed failure
   without hanging WPF-side code: **pending**
 - Explicit restart during the real-audio probe creates a new worker session:
   **pending**
-- No worker remains after every probe exit: **pending**
+- No worker remains after every validation probe exit: **passed**
 
 Ordinary WPF startup remains unchanged and is not a Stage 4 worker owner. It
 must continue to start neither audio capture nor the worker.

@@ -15,9 +15,9 @@
     Windows 10 core real-audio acceptance
   - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
     foundation implementation and automated cross-process validation
-- Current status: Stage 4 implementation and automated validation are complete.
-  Real-audio IPC acceptance on Windows 10 and all Windows 11 Stage 4 runtime
-  checks remain pending
+- Current status: Stage 4 implementation, automated validation, and the Windows
+  10 default-device real-audio normal-stop path are complete. Remaining Windows
+  10 edge/manual checks and all Windows 11 Stage 4 runtime checks are pending
 - Next stage: Stage 5 has not begun and must not begin without explicit approval
 
 ## Environment
@@ -266,9 +266,15 @@ status publication is generation/state-version guarded; lifecycle disposal is
 joined and repeat-safe; and the audio pipe now has an explicit validated
 `AudioStreamEnd` drain barrier. Initial source gaps are counted from the stream's
 declared sequence, and managed envelope minor/flag validation matches native.
+The real-WASAPI normal-stop regression is also hardened: buffer completion is
+signaled independently from frame availability, pump phase/progress/completion/
+cancellation diagnostics are explicit, and normal stop drains with finite
+progress and stall bounds before sending stream-completion control messages.
+Owned cancellation joins a genuinely stalled pump without being misreported as
+the original failure, and caller cancellation cannot skip mandatory cleanup.
 
-Automated managed tests pass 262 tests with 0 failed and 0 skipped, preserving
-all 250 tests from the previous Stage 4 baseline and all 193 Stage 3 tests. The x64 worker and
+Automated managed tests pass 275 tests with 0 failed and 0 skipped, preserving
+all 262 tests from the previous Stage 4 baseline and all 193 Stage 3 tests. The x64 worker and
 native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
 cross-process probes pass a five-second 250-frame synthetic stream with a real
 heartbeat, one explicit restart (200/200 aggregate frames, zero gaps), typed
@@ -277,9 +283,14 @@ A deterministic slow-worker/backlog probe also sent and received all 250 frames
 and 160,000 PCM bytes with zero gaps, proving that Stop waits for the audio end
 barrier rather than racing queued audio. No worker remained after the probe runs.
 
-Windows 10 real Stage 3 audio through the Stage 4 worker, manual Ctrl+C,
-heartbeat observation, process-orphan checks, and matching capture/worker
-summaries remain pending. All Windows 11 Stage 4 runtime checks remain pending.
+On Windows 10 on 2026-07-24, a ten-second default-device run with the previously
+verified audible Stage 3 WAV produced, drained, sent, and summarized all 500
+frames / 320,000 PCM bytes with zero drops, gaps, or invalid frames. The pump
+observed source completion, reached `Completed`, required no owned cancellation,
+and joined before `AudioStreamEnd`; shutdown was acknowledged with exit code 0,
+no cleanup failure, and no remaining worker. Interactive Ctrl+C, controlled
+worker failure during real capture, explicit real-audio restart, and all Windows
+11 Stage 4 runtime checks remain pending.
 Ordinary WPF startup is unchanged and does not construct capture or worker
 infrastructure. Stage 5 has not begun.
 

@@ -21,6 +21,9 @@ public sealed class AudioFramePumpTests
         Assert.Equal(2, pump.Diagnostics.FramesSent);
         Assert.Equal(1280, pump.Diagnostics.BytesSent);
         Assert.Equal(0, pump.Diagnostics.SourceSequenceGaps);
+        Assert.Equal(AudioFramePumpPhase.Completed, pump.Diagnostics.Phase);
+        Assert.True(pump.Diagnostics.SourceCompletionObserved);
+        Assert.False(pump.Diagnostics.OwnedCancellationUsed);
     }
 
     [Fact]
@@ -58,6 +61,21 @@ public sealed class AudioFramePumpTests
         using var cancellation = new CancellationTokenSource(); var pump = new AudioFramePump(new BoundedAudioFrameBuffer(), new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid(), 1);
         var run = pump.RunAsync(cancellation.Token); cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task OwnedCancellationIsRetainedAsJoinedPumpDiagnostics()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var pump = new AudioFramePump(new BoundedAudioFrameBuffer(), new RecordingTransport(), Guid.NewGuid(), Guid.NewGuid(), 1);
+        var run = pump.RunAsync(cancellation.Token);
+        pump.MarkOwnedCancellationRequested("Test-owned cancellation.");
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.Equal(AudioFramePumpPhase.Canceled, pump.Diagnostics.Phase);
+        Assert.True(pump.Diagnostics.OwnedCancellationUsed);
+        Assert.False(pump.Diagnostics.SourceCompletionObserved);
+        Assert.Equal("Test-owned cancellation.", pump.Diagnostics.FailureReason);
     }
 
     [Fact]

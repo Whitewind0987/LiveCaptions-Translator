@@ -250,6 +250,15 @@ long-lived task ownership remain explicit.
 preserves order, reports source gaps (including a gap before the first sent
 frame) and byte/frame totals, drains buffered data
 on normal completion, and performs one sequential audio-pipe write per frame.
+Its thread-safe diagnostics distinguish waiting, writing, normal completion,
+owned cancellation, and fault phases, including current/last sequence and
+whether source completion was observed. Normal pipeline stop uses finite
+progress- and stall-bounded draining: advancing frame/byte totals extend the
+stall window, while a stalled phase is retained as a typed failure before the
+owned token is canceled and joined. `AudioStreamEnd` and `StopAudioStream` are
+sent only after the pump observes normal source completion. Frame-buffer
+completion uses a separate state-change signal from the authoritative bounded
+queue, so queued frames drain before closure without a semaphore sentinel.
 It creates no second PCM queue: Stage 3's fixed 250-frame drop-oldest buffer
 remains the sole audio backpressure boundary. Completed retired Stage 3 frame-
 publication dispatchers are pruned across repeated capture sessions so restart

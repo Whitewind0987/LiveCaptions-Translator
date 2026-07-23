@@ -28,14 +28,40 @@ namespace LiveCaptionsTranslator
 
         public static bool LogOnlyFlag { get; set; } = false;
         public static bool FirstUseFlag { get; set; } = false;
+        public static bool CaptionSourceUnavailable { get; set; } = false;
 
         public static event Action? TranslationLogged;
 
+        public static void ApplyCaptionSourceUnavailableWarning()
+        {
+            const string warning = "[WARNING] No caption source is available.";
+            var currentCaption = Caption;
+
+            if (currentCaption == null)
+                return;
+
+            currentCaption.DisplayOriginalCaption = warning;
+            currentCaption.DisplayTranslatedCaption = warning;
+            currentCaption.OverlayOriginalCaption = warning;
+            currentCaption.OverlayNoticePrefix = string.Empty;
+            currentCaption.OverlayCurrentTranslation = warning;
+        }
+
         static Translator()
         {
-            window = LiveCaptionsHandler.LaunchLiveCaptions();
-            LiveCaptionsHandler.FixLiveCaptions(Window);
-            LiveCaptionsHandler.HideLiveCaptions(Window);
+            var (success, liveCaptionsWindow, errorMessage) = LiveCaptionsHandler.TryLaunchLiveCaptions();
+
+            if (success && liveCaptionsWindow != null)
+            {
+                window = liveCaptionsWindow;
+                LiveCaptionsHandler.FixLiveCaptions(liveCaptionsWindow);
+                LiveCaptionsHandler.HideLiveCaptions(liveCaptionsWindow);
+            }
+            else
+            {
+                CaptionSourceUnavailable = true;
+                window = null;
+            }
 
             if (!File.Exists(Path.Combine(Directory.GetCurrentDirectory(), models.Setting.FILENAME)))
                 FirstUseFlag = true;
@@ -48,6 +74,9 @@ namespace LiveCaptionsTranslator
         {
             int idleCount = 0;
             int syncCount = 0;
+
+            if (CaptionSourceUnavailable)
+                ApplyCaptionSourceUnavailableWarning();
 
             while (true)
             {
@@ -161,12 +190,27 @@ namespace LiveCaptionsTranslator
         {
             while (true)
             {
-                // Check LiveCaptions.exe still alive
                 if (Window == null)
                 {
+                    if (CaptionSourceUnavailable)
+                    {
+                        Thread.Sleep(2000);
+                        continue;
+                    }
+
+                    Thread.Sleep(2000);
                     Caption.DisplayTranslatedCaption = "[WARNING] LiveCaptions was unexpectedly closed, restarting...";
-                    Window = LiveCaptionsHandler.LaunchLiveCaptions();
-                    Caption.DisplayTranslatedCaption = "";
+                    var (success, newWindow, errorMessage) = LiveCaptionsHandler.TryLaunchLiveCaptions();
+                    if (success && newWindow != null)
+                    {
+                        Window = newWindow;
+                        Caption.DisplayTranslatedCaption = "";
+                    }
+                    else
+                    {
+                        CaptionSourceUnavailable = true;
+                        ApplyCaptionSourceUnavailableWarning();
+                    }
                 }
 
                 // Translate

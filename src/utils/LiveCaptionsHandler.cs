@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows.Automation;
 
 using LiveCaptionsTranslator.apis;
@@ -11,24 +12,45 @@ namespace LiveCaptionsTranslator.utils
 
         private static AutomationElement? captionsTextBlock = null;
 
+        public static (bool Success, AutomationElement? Window, string? ErrorMessage) TryLaunchLiveCaptions()
+        {
+            try
+            {
+                KillAllProcessesByPName(PROCESS_NAME);
+                var process = Process.Start(PROCESS_NAME);
+
+                AutomationElement? window = null;
+                for (int attemptCount = 0;
+                     window == null || window.Current.ClassName.CompareTo("LiveCaptionsDesktopWindow") != 0;
+                     attemptCount++)
+                {
+                    window = FindWindowByPId(process.Id);
+                    if (attemptCount > 10000)
+                        return (false, null, "Failed to find LiveCaptions window after launching.");
+                }
+
+                return (true, window, null);
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2)
+            {
+                return (false, null, "LiveCaptions.exe is not available on this system.");
+            }
+            catch (Win32Exception)
+            {
+                return (false, null, "Failed to start LiveCaptions process.");
+            }
+            catch (Exception ex)
+            {
+                return (false, null, $"Failed to launch LiveCaptions: {ex.Message}");
+            }
+        }
+
         public static AutomationElement LaunchLiveCaptions()
         {
-            // Init
-            KillAllProcessesByPName(PROCESS_NAME);
-            var process = Process.Start(PROCESS_NAME);
-
-            // Search for window
-            AutomationElement? window = null;
-            for (int attemptCount = 0;
-                 window == null || window.Current.ClassName.CompareTo("LiveCaptionsDesktopWindow") != 0;
-                 attemptCount++)
-            {
-                window = FindWindowByPId(process.Id);
-                if (attemptCount > 10000)
-                    throw new Exception("Failed to launch LiveCaptions!");
-            }
-
-            return window;
+            var (success, window, errorMessage) = TryLaunchLiveCaptions();
+            if (!success)
+                throw new Exception(errorMessage ?? "Failed to launch LiveCaptions!");
+            return window!;
         }
 
         public static void KillLiveCaptions(AutomationElement window)

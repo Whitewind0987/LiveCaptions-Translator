@@ -157,7 +157,7 @@ namespace LiveCaptionsTranslator
 
         private void CheckForFirstUse()
         {
-            if (Translator.FirstUseFlag)
+            if (Translator.FirstUseFlag && Translator.Window != null)
                 ButtonText.Text = "Hide";
         }
 

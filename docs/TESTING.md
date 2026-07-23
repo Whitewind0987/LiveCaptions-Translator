@@ -41,6 +41,66 @@ and does not change runtime behavior.
 - The Windows 10 incompatibility is reproduced and understood.
 - No implementation changes were made.
 
+## Stage 1 manual test checklist
+
+Windows 10 manual testing is complete. Windows 11 runtime testing remains
+pending and is not included in the Windows 10 acceptance result.
+
+### Windows 10 checks
+
+- Application opens without `TypeInitializationException`: **passed**
+- Main window is usable: **passed**
+- Settings page opens: **passed**
+- History page opens: **passed**
+- Overlay window opens and closes: **passed**
+- `[WARNING] No caption source is available.` is displayed: **passed**
+- Application remains open for at least two minutes: **passed**
+- `LiveCaptions` process count remains 0 during six checks at 20-second
+  intervals: **passed**
+- Pausing displays `[Paused]`: **passed**
+- Resuming immediately restores
+  `[WARNING] No caption source is available.`: **passed**
+- No repeated Live Captions launch attempts are observed: **passed**
+- Application closes without leaving `LiveCaptionsTranslator` or
+  `LiveCaptions` processes: **passed**
+
+### Windows 10 acceptance result
+
+Stage 1 is complete on Windows 10. The optional Windows Live Captions startup
+behavior and unavailable-source pause/resume behavior passed manual verification.
+
+### Windows 11 checks
+
+All Windows 11 behavior checks are **pending** until tested on a Windows 11
+system with Windows Live Captions available.
+
+- Application opens on Windows 11: **pending**
+- LiveCaptions process is launched and hidden: **pending**
+- Captions are read from LiveCaptions window: **pending**
+- Translations are produced: **pending**
+- Overlay displays live captions and translations: **pending**
+- First-use flow (settings page, LiveCaptions restored, welcome window): **pending**
+- Show/Hide button in settings toggles LiveCaptions visibility: **pending**
+- Unexpected LiveCaptions closure triggers controlled restart attempt: **pending**
+- Application closes cleanly (LiveCaptions restored and killed): **pending**
+
+### Build checks
+
+- `dotnet restore`: **passed**
+- `dotnet build`: **passed**
+- Current build warning summary: 378 reported warnings, representing 189 unique
+  source diagnostics reported once for the WPF temporary project and once for
+  the main project
+- New warnings introduced by the pause/resume warning restoration fix: none
+- Stage 0 recorded baseline: 191 warnings
+
+### Local runtime files
+
+The following root-level local runtime files are ignored and were not committed:
+
+- `/setting.json`
+- `/translation_history.db`
+
 ## Future fixed audio fixtures
 
 To be defined in a later implementation stage. No fixture results are recorded

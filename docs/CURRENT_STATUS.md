@@ -2,12 +2,14 @@
 
 ## Repository state
 
-- Branch: `feature/win10-asr-backend`
+- Branch: `feature/optional-live-captions`
 - Baseline commit: `7a6fe4a5b294dacc4aa1b3666981d6c00dbcd183`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
-- Completed stage: Stage 0 environment and baseline verification
-- Source modifications before these documentation files: none
-- Git working tree before documentation: clean
+- Completed stages:
+  - Stage 0 environment and baseline verification
+  - Stage 1 optional Windows Live Captions startup, verified on Windows 10
+- Current status: Stage 1 is complete on Windows 10; Windows 11 runtime
+  behavior has not yet been verified
 
 ## Environment
 
@@ -27,22 +29,60 @@
 The 191 warnings are existing baseline warnings. Warning cleanup is outside
 Stage 0, and these warnings are not addressed in this stage.
 
-## Confirmed Windows 10 incompatibility
+## Stage 1 implementation
 
-The current baseline fails at runtime on Windows 10 because it has a mandatory
-startup dependency on Windows Live Captions:
+Stage 1 removes the mandatory startup dependency on Windows Live Captions so
+the application can start and remain usable on Windows 10.
 
-1. `Translator` static initialization calls
-   `LiveCaptionsHandler.LaunchLiveCaptions()`.
-2. `LaunchLiveCaptions()` calls `Process.Start("LiveCaptions")`.
-3. Windows 10 does not provide `LiveCaptions.exe`.
-4. Process creation raises `Win32Exception` with error code 2 (file not found),
-   which then causes a `TypeInitializationException` for `Translator`.
+### Changes
 
-## Next stage
+- `LiveCaptionsHandler.TryLaunchLiveCaptions()` replaces the throwing
+  `LaunchLiveCaptions()` in `Translator` static initialization. It returns a
+  structured result instead of throwing on failure.
+- `Translator.CaptionSourceUnavailable` flag distinguishes an unavailable
+  caption source (e.g. Win10 without LiveCaptions.exe) from a window that was
+  previously available and was unexpectedly closed.
+- `Translator` static constructor no longer crashes when LiveCaptions.exe is
+  absent. It records the unavailable state and initializes settings and caption
+  state normally.
+- `SyncLoop` displays `[WARNING] No caption source is available.` once when the
+  source is unavailable, then idles safely.
+- `TranslateLoop` does not attempt `Process.Start("LiveCaptions")` in a tight
+  loop when the source is unavailable. For unexpected closure, it uses
+  `TryLaunchLiveCaptions()` with a 2-second backoff. A failed restart sets
+  `CaptionSourceUnavailable` to prevent further retry.
+- `MainWindow.CheckForFirstUse()` guards `RestoreLiveCaptions` with a null
+  window check.
+- `SettingPage.CheckForFirstUse()` guards button text assignment with a null
+  window check.
+- `SettingPage.LiveCaptionsButton_click` already returned early on null window;
+  unchanged beyond the existing null guard.
+- `Translator.ApplyCaptionSourceUnavailableWarning()` applies the unavailable
+  source warning consistently to the main caption and overlay state. Resuming
+  from `[Paused]` restores the warning immediately when no caption source is
+  available.
 
-Stage 1 will remove the mandatory startup dependency on Windows Live Captions
-while preserving the existing Windows 11 behavior.
+### Manual testing status
 
-This file must be updated at the end of every future implementation stage.
+Windows 10 manual testing passed. The application starts and remains usable
+without Windows Live Captions, displays the unavailable-source warning, restores
+that warning immediately after pause/resume, does not repeatedly attempt to
+launch Live Captions, and exits without leaving application or Live Captions
+processes running.
+
+Windows 11 runtime behavior has not yet been verified. No Windows 11 checks are
+recorded as passed. See `docs/TESTING.md` for the detailed results.
+
+### Local runtime files
+
+The following root-level runtime files are ignored and were not committed:
+
+- `/setting.json`
+- `/translation_history.db`
+
+### Known remaining Windows 10 incompatibility
+
+Windows 10 still has no real-time caption source. The application shows a
+warning and idles. A future stage will add local speech recognition. Stage 2
+has not begun.
 

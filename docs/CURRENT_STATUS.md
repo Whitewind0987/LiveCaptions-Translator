@@ -275,7 +275,7 @@ Owned cancellation joins a genuinely stalled pump without being misreported as
 the original failure, and caller cancellation cannot skip mandatory cleanup.
 
 Automated managed tests pass 293 tests with 0 failed and 0 skipped, preserving
-all 275 tests from the immediately previous committed result and all 193 Stage
+all 283 tests from the immediately previous committed result and all 193 Stage
 3 tests. The x64 worker and
 native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
 cross-process probes pass a five-second 250-frame synthetic stream with a real

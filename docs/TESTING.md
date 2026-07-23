@@ -435,7 +435,7 @@ Current result:
 - 293 passed
 - 0 failed
 - 0 skipped
-- all 275 tests from the immediately previous committed result are preserved
+- all 283 tests from the immediately previous committed result are preserved
 - all existing 193 Stage 3 tests are preserved
 - no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
 

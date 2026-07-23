@@ -2,7 +2,7 @@
 
 ## Repository state
 
-- Branch: `feature/wasapi-audio-capture`
+- Branch: `feature/win10-asr-backend`
 - Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
 - Completed stages:

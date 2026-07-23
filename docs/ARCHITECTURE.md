@@ -32,13 +32,17 @@ The failure is then exposed as a `TypeInitializationException` for `Translator`.
 The final system has two process boundaries:
 
 1. The existing .NET 8 WPF application remains the user-facing and coordinating
-   process.
-2. A separate native ASR worker captures normalized audio input, runs local
-   speech recognition, and publishes caption events.
+   process. It owns WASAPI loopback audio capture, PCM normalization, bounded
+   audio buffering, and sends normalized PCM to the ASR worker.
+2. A separate native ASR worker receives normalized PCM audio from the WPF
+   process, runs local speech recognition (Silero VAD + whisper.cpp), and
+   publishes caption events.
 
-The processes are expected to communicate over Windows named pipes using a
-versioned local IPC protocol. Protocol messages must be explicitly versioned so
-that either process can detect incompatible peers and fail predictably.
+The processes communicate over Windows named pipes using a versioned local IPC
+protocol. The IPC design supports control messages, lifecycle messages,
+normalized PCM audio, worker status, errors, and caption events. Protocol
+messages must be explicitly versioned so that either process can detect
+incompatible peers and fail predictably.
 
 ## WPF application responsibilities
 
@@ -47,6 +51,11 @@ The WPF process remains responsible for:
 - the main UI and overlay captions;
 - translation API integration;
 - settings and translation history;
+- WASAPI loopback system-audio capture;
+- playback-device enumeration and selection;
+- conversion of captured audio to normalized 16 kHz mono PCM;
+- bounded audio buffering;
+- sending normalized PCM to the ASR worker through versioned local IPC;
 - ASR model and native runtime management;
 - starting, monitoring, stopping, and, where appropriate, restarting the ASR
   worker;
@@ -61,8 +70,7 @@ The WPF process must not directly load the final CUDA speech-recognition runtime
 The future native worker will be responsible for:
 
 - receiving configuration and lifecycle commands from the WPF process;
-- capturing system audio through WASAPI loopback;
-- converting captured audio to normalized 16 kHz mono PCM;
+- receiving normalized PCM audio from the WPF process via named pipe;
 - applying Silero VAD to identify speech regions;
 - running `whisper.cpp` with optional CUDA acceleration and CPU fallback;
 - emitting ordered partial, committed, final, and reset caption events;
@@ -73,12 +81,22 @@ The future native worker will be responsible for:
 
 The planned audio path is:
 
-`arbitrary application audio -> Windows audio engine -> WASAPI loopback ->`
-`resampling/channel conversion -> normalized 16 kHz mono PCM -> VAD -> whisper.cpp`
+```
+arbitrary application audio
+→ Windows audio engine
+→ [WPF] WASAPI loopback capture
+→ [WPF] resampling/channel conversion
+→ [WPF] normalized 16 kHz mono PCM
+→ [IPC] versioned named pipe
+→ [ASR worker] VAD (Silero)
+→ [ASR worker] whisper.cpp
+```
 
-Normalization must produce a stable input format independent of the endpoint's
-native sample rate, channel layout, or sample representation. Capture,
-conversion, buffering, and recognition must be testable as separate stages.
+The WPF process owns capture and normalization, producing a stable input format
+independent of the endpoint's native sample rate, channel layout, or sample
+representation. The ASR worker receives only normalized PCM and owns VAD and
+inference. Capture, conversion, buffering, IPC, VAD, and recognition must be
+testable as separate stages.
 
 ## Caption event lifecycle
 
@@ -106,6 +124,11 @@ caption version, and accepted translation.
 
 ## Failure isolation
 
+Audio capture, PCM normalization, and buffering belong in the WPF process.
+Failures such as a missing or disconnected audio device, unsupported endpoint
+format, or buffer overrun are surfaced by the WPF application itself without
+terminating the ASR worker.
+
 Native recognition and optional CUDA execution belong in the worker so a native
 crash, accelerator initialization failure, or unrecoverable model error does not
 directly terminate the WPF process. The WPF application must detect worker exit
@@ -118,13 +141,18 @@ session can be rejected.
 
 - The UI application remains a .NET 8 WPF application.
 - Windows 10 and Windows 11 are supported targets.
-- System audio capture uses WASAPI loopback.
+- System audio capture uses WASAPI loopback and is owned by the WPF process.
+- The WPF process normalizes captured audio to 16 kHz mono PCM before sending
+  it to the worker.
 - Recognition runs out of process in a native worker.
-- Worker audio input is normalized 16 kHz mono PCM.
+- The worker receives normalized 16 kHz mono PCM via named pipe; it does not
+  perform audio capture or format conversion.
 - The recognition engine is `whisper.cpp`, with optional CUDA acceleration and
   CPU fallback.
-- Silero VAD is part of the planned recognition pipeline.
-- Local IPC is versioned and is expected to use Windows named pipes.
+- Silero VAD is part of the planned recognition pipeline and runs in the worker.
+- Local IPC is versioned, uses Windows named pipes, and supports control
+  messages, lifecycle messages, normalized PCM audio, worker status, errors,
+  and caption events.
 - Caption and translation state is versioned to prevent stale updates.
 - Python is not part of the final runtime.
 - The WPF process does not load the final CUDA speech-recognition runtime.
@@ -141,4 +169,3 @@ The following are not acceptable as the final runtime architecture:
 - coupling audio capture, recognition, and UI state inside one process;
 - using unversioned text messages that cannot reject stale caption or
   translation results.
-

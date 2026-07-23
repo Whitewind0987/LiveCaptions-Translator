@@ -10,18 +10,19 @@ The planned recognition path is:
 
 ```text
 System audio
-→ WASAPI loopback capture
-→ 16 kHz mono PCM normalization
-→ separate native ASR worker
-→ Silero VAD
-→ whisper.cpp
-→ versioned caption events
-→ translation and overlay display
+→ [WPF] WASAPI loopback capture
+→ [WPF] 16 kHz mono PCM normalization
+→ [WPF] bounded audio buffering
+→ [IPC] versioned named pipe
+→ [ASR worker] Silero VAD
+→ [ASR worker] whisper.cpp
+→ [ASR worker] versioned caption events
+→ [WPF] translation and overlay display
 ```
 
 The implementation is intentionally divided into independently testable stages.
 
-------
+---
 
 ## Required Reading
 
@@ -42,7 +43,7 @@ Treat these files as the current source of truth for:
 
 Do not rely on an earlier conversation, cached assumption, or previous agent report when these documents provide newer information.
 
-------
+---
 
 ## Scope Discipline
 
@@ -62,7 +63,7 @@ Do not:
 
 When a task reveals a problem outside its scope, report it as a follow-up instead of fixing it automatically.
 
-------
+---
 
 ## Fixed Architecture Constraints
 
@@ -75,6 +76,11 @@ Unless the user explicitly approves an architecture change:
    - settings;
    - translation history;
    - runtime and model management;
+   - WASAPI loopback system-audio capture;
+   - playback-device enumeration and selection;
+   - conversion of captured audio to normalized 16 kHz mono PCM;
+   - bounded audio buffering;
+   - sending normalized PCM to the ASR worker through versioned local IPC;
    - supervising the ASR worker.
 2. System audio will be captured through WASAPI loopback.
 3. Captured audio will be normalized to 16 kHz mono PCM before recognition.
@@ -84,7 +90,7 @@ Unless the user explicitly approves an architecture change:
    - optional CUDA acceleration;
    - CPU fallback;
    - Silero VAD.
-6. Communication between the WPF application and ASR worker must use a versioned local IPC protocol.
+6. Communication between the WPF application and ASR worker must use a versioned local IPC protocol. The IPC must support control messages, lifecycle messages, normalized PCM audio, worker status, errors, and caption events.
 7. Captions must use structured, versioned events such as:
    - `Partial`;
    - `Committed`;
@@ -95,7 +101,7 @@ Unless the user explicitly approves an architecture change:
 10. The WPF process must not directly load the final CUDA speech-recognition runtime.
 11. Each stage must remain independently testable.
 
-------
+---
 
 ## Explicitly Rejected Final Designs
 
@@ -112,7 +118,7 @@ Do not use the following as the final architecture:
 
 A temporary prototype using a rejected approach requires explicit approval and must be clearly marked as disposable.
 
-------
+---
 
 ## Current Baseline
 
@@ -124,7 +130,7 @@ docs/CURRENT_STATUS.md
 
 Do not duplicate volatile branch, commit, SDK, or stage information in this file. Update `CURRENT_STATUS.md` instead.
 
-------
+---
 
 ## Development Workflow
 
@@ -148,7 +154,7 @@ feature/win10-asr-backend
 
 only after the stage acceptance criteria pass.
 
-------
+---
 
 ## Build Environment
 
@@ -176,7 +182,7 @@ When warnings are relevant, distinguish between:
 
 Do not claim runtime success when only compilation was tested.
 
-------
+---
 
 ## Testing Rules
 
@@ -200,7 +206,7 @@ When a test cannot be run in the current environment, state:
 
 Future audio fixtures and regression results belong in `docs/TESTING.md`.
 
-------
+---
 
 ## Source-Code Rules
 
@@ -226,7 +232,7 @@ Avoid:
 - hidden fallback behavior;
 - mixing UI, audio capture, inference, and translation in the same class.
 
-------
+---
 
 ## Windows Compatibility
 
@@ -240,7 +246,7 @@ Do not introduce a dependency on a Windows 11-only feature unless:
 
 Windows Live Captions may remain available as a Windows 11 caption source, but application startup must not require `LiveCaptions.exe` on Windows 10.
 
-------
+---
 
 ## Dependency Rules
 
@@ -258,7 +264,7 @@ Do not add dependencies for a future stage.
 
 Pin versions deliberately. Do not perform broad dependency upgrades unless requested.
 
-------
+---
 
 ## Documentation Rules
 
@@ -280,7 +286,7 @@ Documentation must distinguish clearly between:
 - experimental behavior;
 - known limitations.
 
-------
+---
 
 ## Git Safety
 
@@ -306,7 +312,7 @@ git status --short
 
 Report every modified or untracked file.
 
-------
+---
 
 ## Completion Report
 
@@ -323,7 +329,7 @@ Every implementation response must include:
 
 Do not describe planned functionality as completed.
 
-------
+---
 
 ## Priority Order
 

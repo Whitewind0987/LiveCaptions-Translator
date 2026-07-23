@@ -273,7 +273,7 @@ progress and stall bounds before sending stream-completion control messages.
 Owned cancellation joins a genuinely stalled pump without being misreported as
 the original failure, and caller cancellation cannot skip mandatory cleanup.
 
-Automated managed tests pass 275 tests with 0 failed and 0 skipped, preserving
+Automated managed tests pass 283 tests with 0 failed and 0 skipped, preserving
 all 262 tests from the previous Stage 4 baseline and all 193 Stage 3 tests. The x64 worker and
 native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
 cross-process probes pass a five-second 250-frame synthetic stream with a real
@@ -288,9 +288,16 @@ verified audible Stage 3 WAV produced, drained, sent, and summarized all 500
 frames / 320,000 PCM bytes with zero drops, gaps, or invalid frames. The pump
 observed source completion, reached `Completed`, required no owned cancellation,
 and joined before `AudioStreamEnd`; shutdown was acknowledged with exit code 0,
-no cleanup failure, and no remaining worker. Interactive Ctrl+C, controlled
-worker failure during real capture, explicit real-audio restart, and all Windows
-11 Stage 4 runtime checks remain pending.
+no cleanup failure, and no remaining worker. Controlled worker failure during
+real capture and explicit real-audio restart now pass: controlled exit retains
+typed `WorkerExited`, joins capture/pump cleanup without forced termination or
+cleanup failures, and leaves no worker; the restart check is an explicit
+bounded two-session test (248 frames then 249) with different session IDs and
+PIDs, exact per-session capture/pump/transport/worker totals, and clean drains.
+This does not claim seamless mid-stream restart. Interactive Ctrl+C remains
+pending because the non-interactive validation host could not reliably deliver
+a genuine console Ctrl+C event. All Windows 11 Stage 4 runtime checks remain
+pending.
 Ordinary WPF startup is unchanged and does not construct capture or worker
 infrastructure. Stage 5 has not begun.
 

@@ -8,4 +8,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\LiveCaptionsTranslator.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="LiveCaptionsTranslator.Tests" />
+  </ItemGroup>
 </Project>

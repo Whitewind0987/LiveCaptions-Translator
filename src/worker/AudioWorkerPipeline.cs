@@ -128,8 +128,12 @@ namespace LiveCaptionsTranslator.worker
             catch (OperationCanceledException) when (sessionCancellation?.IsCancellationRequested == true) { }
             catch (Exception ex)
             {
-                var kind = ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
-                await BeginTerminalCleanup(kind, ex.Message, normalStop: false).ConfigureAwait(false);
+                var worker = supervisor.Diagnostics;
+                var kind = worker.State == AsrWorkerState.Faulted && worker.FailureKind == AsrWorkerFailureKind.WorkerExited
+                    ? AsrWorkerFailureKind.WorkerExited
+                    : ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
+                var reason = kind == AsrWorkerFailureKind.WorkerExited ? worker.FailureReason ?? ex.Message : ex.Message;
+                await BeginTerminalCleanup(kind, reason, normalStop: false).ConfigureAwait(false);
             }
         }
 
@@ -160,7 +164,7 @@ namespace LiveCaptionsTranslator.worker
 
                 if (pumpTask != null)
                 {
-                    var drain = await DrainPumpAsync(pumpTask, normalStop).ConfigureAwait(false);
+                    var drain = await DrainPumpAsync(pumpTask, normalStop, originalKind).ConfigureAwait(false);
                     pumpJoined = pumpTask.IsCompleted;
                     pumpDrainedNormally = drain.CompletedNormally;
                     if (!drain.CompletedNormally)
@@ -223,7 +227,10 @@ namespace LiveCaptionsTranslator.worker
             finally { lifecycle.Release(); }
         }
 
-        private async Task<PumpDrainResult> DrainPumpAsync(Task ownedPump, bool normalStop)
+        private async Task<PumpDrainResult> DrainPumpAsync(
+            Task ownedPump,
+            bool normalStop,
+            AsrWorkerFailureKind originalKind)
         {
             if (!normalStop)
             {
@@ -232,7 +239,10 @@ namespace LiveCaptionsTranslator.worker
                 catch (Exception ex)
                 {
                     var kind = ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
-                    return new(false, kind, ex.Message, $"Pump failed: {ex.Message}");
+                    var cleanupFailure = originalKind == AsrWorkerFailureKind.WorkerExited && kind == AsrWorkerFailureKind.AudioPipeClosed
+                        ? null
+                        : $"Pump failed: {ex.Message}";
+                    return new(false, kind, ex.Message, cleanupFailure);
                 }
                 return new(false, AsrWorkerFailureKind.AudioPumpFailed, "Audio pump was canceled during terminal cleanup.", null);
             }

@@ -3,14 +3,21 @@ using LiveCaptionsTranslator.audio.windows;
 using LiveCaptionsTranslator.ipc;
 using LiveCaptionsTranslator.worker;
 
+namespace LiveCaptionsTranslator.tools.asrworkerprobe;
+
 internal static class Program
 {
-    private sealed record Options(string Worker, bool Synthetic, bool Audio, bool Restart, bool ControlledExit, bool SlowWorker, string? Device, int DurationSeconds, int? CancelAfterMilliseconds);
+    private sealed record AudioSessionSnapshot(
+        string Label,
+        Guid WorkerSessionId,
+        int WorkerProcessId,
+        AudioWorkerPipelineDiagnostics Pipeline,
+        AsrWorkerDiagnostics Worker);
 
     public static async Task<int> Main(string[] args)
     {
-        Options options;
-        try { options = Parse(args); }
+        ProbeOptions options;
+        try { options = ProbeOptionsParser.Parse(args); }
         catch (Exception ex) { Console.Error.WriteLine(ex.Message); Usage(); return 2; }
         using var cancellation = new CancellationTokenSource();
         if (options.CancelAfterMilliseconds.HasValue)
@@ -26,7 +33,7 @@ internal static class Program
         catch (Exception ex) { Console.Error.WriteLine($"Probe failure: {ex}"); return 1; }
     }
 
-    private static async Task<int> RunSyntheticAsync(Options options, CancellationToken cancellationToken)
+    private static async Task<int> RunSyntheticAsync(ProbeOptions options, CancellationToken cancellationToken)
     {
         var previousDelay = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS");
         if (options.SlowWorker) Environment.SetEnvironmentVariable("LIVE_CAPTIONS_ASR_TEST_AUDIO_DELAY_MS", "5");
@@ -116,33 +123,185 @@ internal static class Program
         return summary;
     }
 
-    private static async Task<int> RunAudioAsync(Options options, CancellationToken cancellationToken)
+    private static async Task<int> RunAudioAsync(ProbeOptions options, CancellationToken cancellationToken)
     {
-        await using var capture = new AudioCaptureService(new WindowsAudioEndpointProvider(), new WasapiLoopbackCaptureRuntimeFactory());
-        await using var supervisor = new AsrWorkerSupervisor(options.Worker);
-        await using var pipeline = new AudioWorkerPipeline(capture, supervisor);
+        var capture = new AudioCaptureService(new WindowsAudioEndpointProvider(), new WasapiLoopbackCaptureRuntimeFactory());
+        var supervisor = new AsrWorkerSupervisor(options.Worker);
+        var pipeline = new AudioWorkerPipeline(capture, supervisor);
+        var sessions = new List<AudioSessionSnapshot>();
+        var disposalFailures = new List<Exception>();
+        Exception? operationFailure = null;
+        var requestedCancellation = false;
+        Guid activeWorkerSession = Guid.Empty;
+        var activeWorkerPid = 0;
+
         try
         {
-            await pipeline.StartAsync(options.Device is "default" ? null : options.Device, cancellationToken).ConfigureAwait(false);
-            await Task.Delay(TimeSpan.FromSeconds(options.DurationSeconds), cancellationToken).ConfigureAwait(false);
-            await pipeline.StopAsync(cancellationToken).ConfigureAwait(false);
-            var diagnostics = pipeline.Diagnostics;
-            var worker = supervisor.Diagnostics;
-            var captureFrames = diagnostics.Capture.FramesProduced - diagnostics.Capture.FramesDropped;
-            var sent = diagnostics.Pump?.FramesSent ?? -1;
-            var received = diagnostics.WorkerSummary?.FramesReceived ?? -1;
-            var stopBoundaryRemainder = Math.Max(0, captureFrames - sent);
-            var validBoundary = stopBoundaryRemainder <= 3;
-            return diagnostics.State == AudioWorkerPipelineState.Stopped && diagnostics.FailureKind == AsrWorkerFailureKind.None && diagnostics.Capture.FramesDropped == 0 && validBoundary && sent == received && diagnostics.Pump?.SourceSequenceGaps == 0 && diagnostics.WorkerSummary?.SequenceGaps == 0 && diagnostics.WorkerSummary?.InvalidFrames == 0 && worker.HeartbeatFailures == 0 && worker.JobAssignmentSucceeded && worker.GracefulShutdownSucceeded && !worker.ForcedTerminationUsed && worker.ProcessExitCode == 0 && diagnostics.CleanupFailures.Count == 0 && diagnostics.PumpJoined && diagnostics.Pump?.SourceCompletionObserved == true ? 0 : 1;
+            try
+            {
+                if (options.ControlledExit)
+                {
+                    (activeWorkerSession, activeWorkerPid) = await StartAudioSessionAsync(pipeline, supervisor, options, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Min(options.DurationSeconds, 3)), cancellationToken).ConfigureAwait(false);
+                    await supervisor.TerminateOwnedWorkerForDiagnosticsAsync(cancellationToken).ConfigureAwait(false);
+                    await WaitForStateAsync(pipeline, AudioWorkerPipelineState.Faulted, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+                    await WaitForAudioCleanupAsync(pipeline, supervisor, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+                }
+                else if (options.Restart)
+                {
+                    var halfDuration = TimeSpan.FromSeconds(options.DurationSeconds / 2d);
+                    (activeWorkerSession, activeWorkerPid) = await StartAudioSessionAsync(pipeline, supervisor, options, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(halfDuration, cancellationToken).ConfigureAwait(false);
+                    await pipeline.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                    sessions.Add(Snapshot("First real-audio session", activeWorkerSession, activeWorkerPid, pipeline, supervisor));
+
+                    var restarted = await supervisor.RestartAsync(cancellationToken).ConfigureAwait(false);
+                    if (!restarted.Success || restarted.SessionId == null || restarted.ProcessId == null)
+                        throw new InvalidOperationException(restarted.FailureReason ?? "Explicit worker restart failed.");
+                    activeWorkerSession = restarted.SessionId.Value;
+                    activeWorkerPid = restarted.ProcessId.Value;
+                    await pipeline.StartAsync(options.Device is "default" ? null : options.Device, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(halfDuration, cancellationToken).ConfigureAwait(false);
+                    await pipeline.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                else
+                {
+                    (activeWorkerSession, activeWorkerPid) = await StartAudioSessionAsync(pipeline, supervisor, options, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(options.DurationSeconds), cancellationToken).ConfigureAwait(false);
+                    await pipeline.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                requestedCancellation = true;
+            }
+            catch (Exception ex)
+            {
+                operationFailure = ex;
+            }
         }
         finally
         {
-            PrintAudioDiagnostics(pipeline.Diagnostics, supervisor.Diagnostics);
+            await DisposeAudioOwnersAsync(pipeline, supervisor, capture, disposalFailures).ConfigureAwait(false);
         }
+
+        sessions.Add(Snapshot(
+            options.Restart ? "Second real-audio session" : options.ControlledExit ? "Controlled-exit real-audio session" : "Real-audio session",
+            activeWorkerSession,
+            activeWorkerPid,
+            pipeline,
+            supervisor));
+        foreach (var session in sessions)
+            PrintAudioDiagnostics(session);
+        Console.WriteLine($"Disposal failures: {(disposalFailures.Count == 0 ? "none" : string.Join(" | ", disposalFailures.Select(DescribeException)))}");
+
+        if (operationFailure != null)
+        {
+            Console.Error.WriteLine($"Real-audio operation failed: {operationFailure}");
+            return 1;
+        }
+        if (disposalFailures.Count != 0)
+            return 1;
+
+        var final = sessions[^1];
+        if (requestedCancellation)
+        {
+            var accepted = IsCleanAudioSession(final, requireAudio: false);
+            if (accepted) Console.WriteLine("Requested cancellation completed cleanly.");
+            return accepted ? 0 : 1;
+        }
+        if (options.ControlledExit)
+            return IsExpectedControlledExit(final) ? 0 : 1;
+        if (options.Restart)
+        {
+            var first = sessions[0];
+            var second = sessions[1];
+            var identitiesChanged = first.WorkerSessionId != Guid.Empty && second.WorkerSessionId != Guid.Empty &&
+                first.WorkerSessionId != second.WorkerSessionId && first.WorkerProcessId > 0 &&
+                second.WorkerProcessId > 0 && first.WorkerProcessId != second.WorkerProcessId;
+            return identitiesChanged && IsCleanAudioSession(first, requireAudio: true) && IsCleanAudioSession(second, requireAudio: true) ? 0 : 1;
+        }
+        return IsCleanAudioSession(final, requireAudio: true) ? 0 : 1;
     }
 
-    private static void PrintAudioDiagnostics(AudioWorkerPipelineDiagnostics diagnostics, AsrWorkerDiagnostics worker)
+    private static async Task<(Guid SessionId, int ProcessId)> StartAudioSessionAsync(
+        AudioWorkerPipeline pipeline,
+        AsrWorkerSupervisor supervisor,
+        ProbeOptions options,
+        CancellationToken cancellationToken)
     {
+        await pipeline.StartAsync(options.Device is "default" ? null : options.Device, cancellationToken).ConfigureAwait(false);
+        var diagnostics = supervisor.Diagnostics;
+        return (
+            supervisor.SessionId ?? throw new InvalidOperationException("Worker session identity is unavailable after pipeline start."),
+            diagnostics.WorkerPid ?? throw new InvalidOperationException("Owned worker PID is unavailable after pipeline start."));
+    }
+
+    private static AudioSessionSnapshot Snapshot(
+        string label,
+        Guid sessionId,
+        int processId,
+        AudioWorkerPipeline pipeline,
+        AsrWorkerSupervisor supervisor) =>
+        new(label, sessionId, processId, pipeline.Diagnostics, supervisor.Diagnostics);
+
+    private static async Task DisposeAudioOwnersAsync(
+        AudioWorkerPipeline pipeline,
+        AsrWorkerSupervisor supervisor,
+        AudioCaptureService capture,
+        List<Exception> failures)
+    {
+        try { await pipeline.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception ex) { failures.Add(new InvalidOperationException($"Pipeline disposal failed: {DescribeException(ex)}", ex)); }
+        try { await supervisor.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception ex) { failures.Add(new InvalidOperationException($"Supervisor disposal failed: {DescribeException(ex)}", ex)); }
+        try { await capture.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception ex) { failures.Add(new InvalidOperationException($"Capture disposal failed: {DescribeException(ex)}", ex)); }
+    }
+
+    private static bool IsCleanAudioSession(AudioSessionSnapshot session, bool requireAudio)
+    {
+        var pipeline = session.Pipeline;
+        var capture = pipeline.Capture;
+        var pump = pipeline.Pump;
+        var summary = pipeline.WorkerSummary;
+        var worker = session.Worker;
+        if (pump == null || summary == null) return false;
+        var totalsMatch = capture.FramesProduced == capture.FramesConsumed &&
+            capture.FramesConsumed == pump.FramesSent && pump.FramesSent == worker.AudioFramesSent &&
+            worker.AudioFramesSent == summary.FramesReceived && pump.BytesSent == worker.AudioBytesSent &&
+            worker.AudioBytesSent == summary.PcmBytesReceived;
+        return (!requireAudio || capture.FramesProduced > 0) && totalsMatch && capture.FramesBuffered == 0 &&
+            capture.FramesDropped == 0 && capture.State == AudioCaptureState.Stopped &&
+            pipeline.State == AudioWorkerPipelineState.Stopped && pipeline.FailureKind == AsrWorkerFailureKind.None &&
+            pipeline.CleanupFailures.Count == 0 && pipeline.PumpJoined && pump.Phase == AudioFramePumpPhase.Completed &&
+            pump.SourceCompletionObserved && !pump.OwnedCancellationUsed && pump.SourceSequenceGaps == 0 &&
+            summary.SequenceGaps == 0 && summary.InvalidFrames == 0 && worker.SequenceGaps == 0 &&
+            worker.WorkerInvalidFrames == 0 && worker.HeartbeatFailures == 0 && worker.JobAssignmentSucceeded &&
+            worker.State == AsrWorkerState.Stopped && worker.FailureKind == AsrWorkerFailureKind.None &&
+            worker.GracefulShutdownSucceeded && !worker.ForcedTerminationUsed && worker.ProcessExitCode == 0 &&
+            worker.CleanupFailures.Count == 0 && worker.WorkerPid == null;
+    }
+
+    private static bool IsExpectedControlledExit(AudioSessionSnapshot session)
+    {
+        var pipeline = session.Pipeline;
+        var worker = session.Worker;
+        return pipeline.State == AudioWorkerPipelineState.Faulted &&
+            pipeline.FailureKind == AsrWorkerFailureKind.WorkerExited &&
+            pipeline.Capture.State == AudioCaptureState.Stopped && pipeline.PumpJoined &&
+            pipeline.CleanupFailures.Count == 0 && worker.State == AsrWorkerState.Stopped &&
+            worker.FailureKind == AsrWorkerFailureKind.WorkerExited && worker.ProcessExitCode.HasValue &&
+            !worker.ForcedTerminationUsed && worker.CleanupFailures.Count == 0 && worker.WorkerPid == null;
+    }
+
+    private static void PrintAudioDiagnostics(AudioSessionSnapshot session)
+    {
+        var diagnostics = session.Pipeline;
+        var worker = session.Worker;
+        Console.WriteLine($"--- {session.Label} ---");
+        Console.WriteLine($"Worker session: {(session.WorkerSessionId == Guid.Empty ? "unavailable" : session.WorkerSessionId)}");
+        Console.WriteLine($"Started worker PID: {(session.WorkerProcessId <= 0 ? "unavailable" : session.WorkerProcessId)}");
         Console.WriteLine($"Capture state: {diagnostics.Capture.State}");
         Console.WriteLine($"Capture frames produced: {diagnostics.Capture.FramesProduced}");
         Console.WriteLine($"Capture frames consumed: {diagnostics.Capture.FramesConsumed}");
@@ -182,6 +341,43 @@ internal static class Program
         Console.WriteLine($"Final pipeline state: {diagnostics.State}");
     }
 
+    private static async Task WaitForStateAsync(
+        AudioWorkerPipeline pipeline,
+        AudioWorkerPipelineState state,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var until = DateTimeOffset.UtcNow + timeout;
+        while (pipeline.State != state && DateTimeOffset.UtcNow < until)
+            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+        if (pipeline.State != state)
+            throw new TimeoutException($"Audio pipeline did not reach {state}.");
+    }
+
+    private static async Task WaitForAudioCleanupAsync(
+        AudioWorkerPipeline pipeline,
+        AsrWorkerSupervisor supervisor,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var until = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < until)
+        {
+            var pipelineDiagnostics = pipeline.Diagnostics;
+            var workerDiagnostics = supervisor.Diagnostics;
+            if (pipelineDiagnostics.PumpJoined && pipelineDiagnostics.Capture.State == AudioCaptureState.Stopped &&
+                supervisor.ActiveTransport == null && workerDiagnostics.ProcessExitCode.HasValue)
+                return;
+            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+        }
+        throw new TimeoutException("Real-audio controlled-exit cleanup did not complete.");
+    }
+
+    private static string DescribeException(Exception exception) =>
+        exception is AggregateException aggregate
+            ? string.Join(" | ", aggregate.Flatten().InnerExceptions.Select(DescribeException))
+            : exception.Message;
+
     private static async Task WaitForStateAsync(AsrWorkerSupervisor supervisor, AsrWorkerState state, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var until = DateTimeOffset.UtcNow + timeout;
@@ -196,29 +392,5 @@ internal static class Program
         if (!condition(supervisor.Diagnostics)) throw new TimeoutException("Worker cleanup diagnostics did not settle.");
     }
 
-    private static Options Parse(string[] args)
-    {
-        string? worker = null, device = "default"; var synthetic = false; var audio = false; var restart = false; var controlled = false; var slowWorker = false; var duration = 5; int? cancelAfter = null;
-        for (var i = 0; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "--worker": worker = args[++i]; break;
-                case "--synthetic": synthetic = true; break;
-                case "--audio": audio = true; break;
-                case "--restart": restart = true; break;
-                case "--controlled-exit": controlled = true; break;
-                case "--slow-worker": slowWorker = true; break;
-                case "--device": device = args[++i]; break;
-                case "--duration": duration = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;
-                case "--cancel-after-ms": cancelAfter = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;
-                default: throw new ArgumentException($"Unknown argument '{args[i]}'.");
-            }
-        }
-        if (string.IsNullOrWhiteSpace(worker) || synthetic == audio || duration < 1) throw new ArgumentException("Specify --worker and exactly one of --synthetic or --audio with a positive duration.");
-        if (cancelAfter <= 0) throw new ArgumentException("Cancellation delay must be positive.");
-        if (slowWorker && !synthetic) throw new ArgumentException("--slow-worker requires --synthetic.");
-        return new(Path.GetFullPath(worker), synthetic, audio, restart, controlled, slowWorker, device, duration, cancelAfter);
-    }
     private static void Usage() => Console.Error.WriteLine("AsrWorkerProbe --worker <exe> (--synthetic|--audio) [--device default|id] [--duration N] [--restart|--controlled-exit] [--slow-worker] [--cancel-after-ms N]");
 }

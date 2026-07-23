@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\LiveCaptionsTranslator.csproj" />
+    <ProjectReference Include="..\..\tools\AsrWorkerProbe\AsrWorkerProbe.csproj" />
   </ItemGroup>
 
 </Project>

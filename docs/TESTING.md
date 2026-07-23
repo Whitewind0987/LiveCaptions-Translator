@@ -432,7 +432,7 @@ dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
 
 Current result:
 
-- 275 passed
+- 283 passed
 - 0 failed
 - 0 skipped
 - all existing 262 tests from before the normal-stop hardening are preserved
@@ -616,10 +616,39 @@ remained after validation.
 - Interactive Ctrl+C shuts down capture, pump, pipes, and worker: **pending**
 - No `LiveCaptionsAsrWorker` process remains: **passed**
 - Controlled worker termination during real capture becomes a typed failure
-  without hanging WPF-side code: **pending**
+  without hanging WPF-side code: **passed**
 - Explicit restart during the real-audio probe creates a new worker session:
-  **pending**
+  **passed**
 - No worker remains after every validation probe exit: **passed**
+
+The real-audio controlled-exit probe captured 149 frames, consumed 124, pumped
+and transported 123 frames / 78,720 PCM bytes, and received 50 frames / 32,000
+bytes of worker progress before intentionally terminating only the supervisor-
+owned worker. The pipeline finished `Faulted` with typed `WorkerExited`;
+capture stopped, the pump joined, forced termination was not used, cleanup and
+disposal failures were empty, no owned PID remained, the final process check
+was empty, and the probe returned 0.
+
+The real-audio restart probe is an explicit bounded two-session acceptance, not
+a seamless mid-stream restart. Session 1 used PID 3652 and session
+`2453313c-849a-4257-b999-b660506bb2cb`; all capture, pump, transport, and worker
+totals were 248 frames / 158,720 PCM bytes. After a complete clean stop/drain,
+session 2 used PID 16000 and session
+`cf3f9deb-5446-4657-8ee7-cb37fe64d743`; all four totals were 249 frames /
+159,360 PCM bytes. Both sessions received real audio, had 0 drops, gaps,
+invalid frames, heartbeat failures, forced terminations, cleanup failures, or
+disposal failures, and ended `Stopped` with acknowledged graceful shutdown and
+exit code 0. No worker remained and the probe returned 0.
+
+Interactive Ctrl+C was attempted from the non-interactive validation host, but
+the host could not reliably deliver a genuine console Ctrl+C event; those
+attempts are not counted as passing. The deterministic cancellation probe still
+passes. Its real-audio run returned 0 after 341 capture, pump, transport, and
+worker-summary frames / 218,240 PCM bytes, with 0 buffered, dropped, gap, or
+invalid frames; capture and pipeline ended `Stopped`, the pump joined after
+source completion, graceful shutdown succeeded, forced termination was false,
+cleanup/disposal failures were empty, and no PID remained. An interactive
+terminal run remains required for the Ctrl+C item.
 
 Ordinary WPF startup remains unchanged and is not a Stage 4 worker owner. It
 must continue to start neither audio capture nor the worker.

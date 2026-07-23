@@ -308,7 +308,8 @@ namespace LiveCaptionsTranslator.ipc
         {
             var failure = new WorkerTransportFailure(kind, reason, exception);
             terminal.TrySetResult(failure);
-            lifetime.Cancel();
+            try { lifetime.Cancel(); }
+            catch (ObjectDisposedException) { }
             foreach (var item in pending.Values) item.TrySetException(new WorkerTransportException(kind, reason, exception));
             return new WorkerTransportException(kind, reason, exception);
         }

@@ -10,12 +10,12 @@
   - Stage 1 optional Windows Live Captions startup, verified on Windows 10
   - Stage 2A source-independent contracts and event-ordering core
   - Stage 2B Windows Live Captions source adapter and production integration
-  - Stage 3 WPF audio-capture foundation implementation and automated tests
-- Current status: Stage 2 is complete and accepted on Windows 10. Stage 3 is
-  implemented and passes automated tests; real-device runtime acceptance on
-  Windows 10 and Windows 11 remains pending
-- Next stage: finish Stage 3 manual audio-capture acceptance. Stage 4 must not
-  begin without explicit approval
+  - Stage 3 WPF audio-capture foundation implementation, automated tests, and
+    Windows 10 core real-audio acceptance
+- Current status: Stage 3 implementation is complete and its Windows 10 core
+  real-audio acceptance passed. Optional Windows 10 endpoint-selection and
+  device-loss checks and all Windows 11 Stage 3 runtime checks remain pending
+- Next stage: Stage 4 has not begun and must not begin without explicit approval
 
 ## Environment
 
@@ -208,8 +208,31 @@ its six 2.3.0 managed transitive packages are MIT licensed, add no new native
 binaries, and occupy approximately 705 KiB as compressed NuGet packages in the
 local cache.
 
-Real Windows 10 and Windows 11 endpoint enumeration, capture, device switching,
-device loss, bounded-duration probe, and clean process/resource shutdown remain
-manual Stage 3 acceptance work. Speech recognition is not implemented and Stage
-4 has not begun.
+Windows 10 core real-audio acceptance passed on 2026-07-23. The default-endpoint
+probe captured audible source audio, produced 497 frames, consumed 494 frames,
+dropped 0 frames, wrote 9.88 seconds of normalized audio with RMS 0.135257 and
+peak 0.720886, reached `Stopped`, reported no failure, and exited with code 0.
+The three unconsumed frames were a 60 ms stop-boundary buffer remainder rather
+than dropped audio. Manual WAV playback had normal speed, audible source audio,
+and no obvious severe distortion or clipping. Endpoint listing, default-device
+availability, bounded completion, Ctrl+C cleanup, no remaining probe process,
+unchanged WPF startup, Settings selector load/refresh, History, Overlay,
+pause/resume, normal shutdown, and absence of application or Live Captions
+process regressions were also verified.
+
+The following optional or edge Windows 10 checks remain pending because they
+were deliberately not run:
+
+- capture using a manually selected explicit endpoint ID;
+- cross-checking the default marker and reported endpoint/input formats;
+- confirming Settings' resolved-System-default label;
+- persistence of a saved active endpoint across application restart;
+- missing saved endpoint fallback to System default;
+- manually observing `Running` and frame-sequence continuity;
+- independent WAV-header/duration and post-exit resource-lock checks;
+- repeated start/stop with a clean new capture session;
+- endpoint disconnect or disable while capture is running.
+
+All Windows 11 Stage 3 runtime acceptance checks remain pending. Speech
+recognition is not implemented, and Stage 4 has not begun.
 

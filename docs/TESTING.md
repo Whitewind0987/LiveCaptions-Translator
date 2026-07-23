@@ -318,40 +318,92 @@ artifacts and must not be committed.
 
 ## Stage 3 Windows 10 manual checklist
 
-All checks are **pending** until run interactively on Windows 10 while known
-audio is playing:
+Manual test date: **2026-07-23**
 
-- `--list` returns active render endpoints without blocking: **pending**
-- The current default endpoint is correctly marked: **pending**
-- Settings lists active endpoints and identifies the resolved system default:
+Windows 10 core real-audio acceptance passed with audible source audio on the
+current default render endpoint:
+
+- `--list` returned active render endpoints: **passed**
+- The current default endpoint was available: **passed**
+- The default-endpoint probe captured real audible source audio: **passed**
+- Frames were produced and consumed: **passed**
+- Dropped-frame count remained 0: **passed**
+- RMS was greater than zero while audio was playing: **passed**
+- Peak remained in the valid normalized PCM range: **passed**
+- Normal bounded probe completion reached `Stopped` and exited with code 0:
+  **passed**
+- The generated normalized WAV was audible, played at normal speed, was not
+  silent, and had no obvious severe distortion or clipping: **passed**
+- Ctrl+C cancellation stopped cleanly with no reported failure: **passed**
+- No probe process remained after exit: **passed**
+- Ordinary WPF startup remained unchanged and did not begin audio capture:
+  **passed**
+- Settings output-device selector loaded and refreshed: **passed**
+- History, Overlay, pause/resume, and normal shutdown remained functional:
+  **passed**
+- No application or `LiveCaptions` process regression was observed: **passed**
+
+The successful real-capture run reported exactly:
+
+```text
+Final state: Stopped
+Frames produced: 497
+Frames consumed: 494
+Frames dropped: 0
+Captured duration: 9.88 s
+RMS: 0.135257
+Peak: 0.720886
+Failure: none
+WAV: C:\Users\YMXD\AppData\Local\Temp\livecaptions-stage3-probe.wav
+ExitCode: 0
+```
+
+The three-frame difference between 497 produced and 494 consumed is a small
+stop-boundary buffer remainder (60 ms at 20 ms per frame), not an overflow:
+`Frames dropped` remained 0. The 494 consumed frames account for the reported
+9.88-second captured WAV. Manual playback confirmed audible source audio,
+normal playback speed, no obvious acceleration or slowdown, no obvious severe
+distortion or clipping, and no silence.
+
+The separate Ctrl+C cancellation run verified cancellation and cleanup only;
+it is not an audio-content verification:
+
+```text
+Final state: Stopped
+Frames produced: 0
+Frames consumed: 0
+Frames dropped: 0
+Captured duration: 0.00 s
+RMS: 0.000000
+Peak: 0.000000
+Failure: none
+```
+
+The following optional or edge checks were deliberately not run and remain
+**pending**:
+
+- Capture using a manually selected explicit endpoint ID: **pending**
+- The default endpoint marker shown by `--list` is manually cross-checked
+  against Windows: **pending**
+- Settings identifies the resolved System default, beyond loading and
+  refreshing the selector: **pending**
+- A saved active endpoint remains selected after application restart:
   **pending**
-- A saved active endpoint resolves and remains selected after application
-  restart: **pending**
-- A missing saved endpoint is visible and falls back safely with a clear
+- A missing saved endpoint falls back to System default with a clear
   diagnostic: **pending**
-- Ordinary WPF startup remains unchanged and starts no audio capture: **pending**
-- With clearly audible speech or video playing, the default-endpoint probe runs
-  for at least ten seconds: **pending**
-- Capture state reaches `Running`: **pending**
-- The selected endpoint and native input format are reported: **pending**
-- Normalized format reports 16,000 Hz, mono, signed PCM16 little-endian:
+- Capture state is manually observed reaching `Running`: **pending**
+- The selected endpoint and native input format are manually confirmed from
+  probe output: **pending**
+- The normalized format report is manually confirmed as 16,000 Hz, mono,
+  signed PCM16 little-endian: **pending**
+- Produced and consumed frame sequence continuity is manually confirmed:
   **pending**
-- Frames are produced and consumed and their sequences are continuous:
-  **pending**
-- Dropped-frame count remains 0 under normal conditions: **pending**
-- RMS is greater than zero while audio is playing: **pending**
-- Peak remains in the valid normalized PCM range: **pending**
-- The optional normalized WAV has a valid header, expected duration, and is
-  audible without gross speed, distortion, or channel errors: **pending**
+- WAV header and duration are independently inspected, beyond successful
+  playback and the reported 9.88-second duration: **pending**
 - Repeated start/stop and a second start create clean new sessions: **pending**
-- Stopping the probe and pressing Ctrl+C both end capture promptly and cleanly:
-  **pending**
-- Exit leaves no `AudioCaptureProbe` or `LiveCaptionsTranslator` process and no
-  locked audio/WAV resource: **pending**
-- Disconnecting or disabling the selected endpoint produces a useful state and
-  failure reason without crashing WPF, where practical to test: **pending**
-- Existing Settings, History, overlay, pause/resume, and Windows 10 unavailable-
-  source behavior remain unchanged: **pending**
+- Audio/WAV resource locks are checked independently after exit: **pending**
+- Endpoint disconnect or disable while capture is running produces a useful
+  state and failure reason without crashing WPF: **pending**
 
 ## Stage 3 Windows 11 manual checklist
 

@@ -21,6 +21,7 @@ public sealed class CaptionEventGateTests
         AssertAccepted(gate, CaptionEventFactory.Reset());
         Assert.Equal(CaptionEventFactory.SessionA, gate.ActiveSessionId);
         Assert.Equal(1, gate.LastAcceptedSequence);
+        Assert.Equal(1, gate.HighestObservedSequence);
         Assert.Null(gate.CurrentSegmentId);
     }
 
@@ -111,6 +112,114 @@ public sealed class CaptionEventGateTests
 
         AssertRejected(gate, CaptionEventFactory.Text(
             CaptionEventKind.Committed, sequence: 2));
+    }
+
+    [Fact]
+    public void RejectedNewerEventMakesLaterLowerSequenceOlder()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 2));
+        AssertRejected(gate, CaptionEventFactory.Text(sequence: 4, segmentId: 2));
+
+        AssertRejected(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3));
+
+        Assert.Equal(2, gate.LastAcceptedSequence);
+        Assert.Equal(4, gate.HighestObservedSequence);
+    }
+
+    [Fact]
+    public void RejectedEventSequenceCannotBeReused()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 2, text: "accepted"));
+        AssertRejected(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3, text: "rejected"));
+
+        AssertRejected(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3, text: "accepted"));
+
+        Assert.Equal(2, gate.LastAcceptedSequence);
+        Assert.Equal(3, gate.HighestObservedSequence);
+    }
+
+    [Fact]
+    public void EventNewerThanRejectedEventCanStillBeAccepted()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 2, text: "accepted"));
+        AssertRejected(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3, text: "rejected"));
+
+        AssertAccepted(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 4, text: "accepted"));
+
+        Assert.Equal(4, gate.LastAcceptedSequence);
+        Assert.Equal(4, gate.HighestObservedSequence);
+    }
+
+    [Fact]
+    public void RejectedForeignSessionDoesNotPoisonActiveObservedSequence()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 2));
+
+        AssertRejected(gate, CaptionEventFactory.Text(
+            sessionId: CaptionEventFactory.SessionB, sequence: 100));
+        Assert.Equal(2, gate.HighestObservedSequence);
+
+        AssertAccepted(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3));
+    }
+
+    [Fact]
+    public void NewSessionResetResetsObservedSequenceState()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 5));
+
+        AssertAccepted(gate, CaptionEventFactory.Reset(CaptionEventFactory.SessionB));
+
+        Assert.Equal(CaptionEventFactory.SessionB, gate.ActiveSessionId);
+        Assert.Equal(1, gate.LastAcceptedSequence);
+        Assert.Equal(1, gate.HighestObservedSequence);
+        Assert.Null(gate.CurrentSegmentId);
+        Assert.Null(gate.CurrentRevision);
+    }
+
+    [Fact]
+    public void SameSessionResetMustBeNewerThanHighestObservedSequence()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(sequence: 2));
+        AssertRejected(gate, CaptionEventFactory.Text(sequence: 4, segmentId: 2));
+
+        AssertRejected(gate, CaptionEventFactory.Reset(sequence: 3));
+
+        Assert.Equal(2, gate.LastAcceptedSequence);
+        Assert.Equal(4, gate.HighestObservedSequence);
+        Assert.Equal(1, gate.CurrentSegmentId);
+        Assert.Equal(1, gate.CurrentRevision);
+    }
+
+    [Fact]
+    public void RejectedEventDoesNotMutateAcceptedState()
+    {
+        var gate = StartedGate();
+        AssertAccepted(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Partial, sequence: 2, text: "accepted"));
+
+        AssertRejected(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 3, text: "rejected"));
+
+        Assert.Equal(2, gate.LastAcceptedSequence);
+        Assert.Equal(3, gate.HighestObservedSequence);
+        Assert.Equal(1, gate.CurrentSegmentId);
+        Assert.Equal(1, gate.CurrentRevision);
+        Assert.False(gate.IsCurrentSegmentFinal);
+
+        AssertAccepted(gate, CaptionEventFactory.Text(
+            CaptionEventKind.Committed, sequence: 4, text: "accepted"));
     }
 
     [Fact]

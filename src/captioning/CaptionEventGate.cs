@@ -8,6 +8,7 @@ namespace LiveCaptionsTranslator.captioning
 
         public Guid? ActiveSessionId { get; private set; }
         public long LastAcceptedSequence { get; private set; }
+        public long HighestObservedSequence { get; private set; }
         public long? CurrentSegmentId { get; private set; }
         public long? CurrentRevision { get; private set; }
         public bool IsCurrentSegmentFinal { get; private set; }
@@ -29,7 +30,7 @@ namespace LiveCaptionsTranslator.captioning
                         : "The caption event belongs to a session that has not been established by Reset.",
                     out rejectionReason);
             }
-            if (!HasNewerSequence(captionEvent.Sequence, out rejectionReason))
+            if (!TryObserveNewerSequence(captionEvent.Sequence, out rejectionReason))
                 return false;
 
             if (!CurrentSegmentId.HasValue)
@@ -103,12 +104,13 @@ namespace LiveCaptionsTranslator.captioning
                 seenSessions.Add(captionEvent.SessionId);
                 ActiveSessionId = captionEvent.SessionId;
                 LastAcceptedSequence = captionEvent.Sequence;
+                HighestObservedSequence = captionEvent.Sequence;
                 ClearSegmentState();
                 rejectionReason = null;
                 return true;
             }
 
-            if (!HasNewerSequence(captionEvent.Sequence, out rejectionReason))
+            if (!TryObserveNewerSequence(captionEvent.Sequence, out rejectionReason))
                 return false;
 
             LastAcceptedSequence = captionEvent.Sequence;
@@ -117,14 +119,15 @@ namespace LiveCaptionsTranslator.captioning
             return true;
         }
 
-        private bool HasNewerSequence(long sequence, out string? rejectionReason)
+        private bool TryObserveNewerSequence(long sequence, out string? rejectionReason)
         {
-            if (sequence == LastAcceptedSequence)
+            if (sequence == HighestObservedSequence)
                 return Reject("Caption event sequence is duplicated.", out rejectionReason);
-            if (sequence < LastAcceptedSequence)
-                return Reject("Caption event sequence is older than the last accepted sequence.",
+            if (sequence < HighestObservedSequence)
+                return Reject("Caption event sequence is older than the highest observed sequence.",
                     out rejectionReason);
 
+            HighestObservedSequence = sequence;
             rejectionReason = null;
             return true;
         }

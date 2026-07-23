@@ -111,13 +111,15 @@ dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.cspr
 
 Result:
 
-- 48 passed
+- 55 passed
 - 0 failed
 - 0 skipped
 
-Coverage includes caption-event construction invariants, session and sequence
-ordering, segment and revision ordering, lifecycle progression, finalized
-segment protection, and committed/final translation-request identity.
+Coverage includes caption-event construction invariants, accepted-versus-
+observed sequence ordering, rejected-sequence retention, foreign-session
+isolation, reset behavior, segment and revision ordering, lifecycle progression,
+finalized segment protection, rejected-event state isolation, and
+committed/final translation-request identity.
 
 The tests are deterministic and do not launch Windows Live Captions, access UI
 Automation, create windows, call translation APIs, access the network, or use

@@ -103,10 +103,11 @@ Stage 2A adds source-independent captioning foundations under `src/captioning/`:
 - immutable and validated caption-event schema version 1;
 - `ICaptionSource`, source states, immutable status, and start-result models;
 - `CaptionEventGate` for session, sequence, segment, revision, and lifecycle
-  ordering;
+  ordering, with accepted and highest-observed sequence state tracked
+  separately;
 - immutable `CaptionTranslationRequest` identity derived only from committed or
   final events;
-- a focused `net8.0-windows` xUnit test project with 48 passing tests.
+- a focused `net8.0-windows` xUnit test project with 55 passing tests.
 
 The contracts are not integrated into `Translator`, application startup,
 `LiveCaptionsHandler`, UI, or runtime loops. Existing Stage 1 behavior is

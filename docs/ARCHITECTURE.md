@@ -138,7 +138,9 @@ The event kinds represent this lifecycle:
 - a sequence-1 `Reset` establishes each new session;
 - a newer `Reset` in the active session clears segment state;
 - delayed events and resets from obsolete sessions are rejected;
-- sequence values strictly increase within a session;
+- sequence values strictly increase among all events observed for the active
+  session, including events rejected by later segment, revision, text, or
+  lifecycle validation;
 - the first segment after reset is 1, segment identities never decrease or
   skip, and a new segment starts only after the preceding segment is final;
 - the first segment revision is 1, revisions never decrease, and a newer
@@ -148,7 +150,14 @@ The event kinds represent this lifecycle:
   to `Committed` to `Final`, while intermediate states may be skipped;
 - no event updates a finalized segment.
 
-The gate exposes read-only diagnostic state and never mutates caption events.
+The gate tracks `HighestObservedSequence` separately from
+`LastAcceptedSequence`. A newer active-session sequence advances the observed
+value before content validation, while only a fully accepted event advances the
+accepted value and caption state. Duplicate and older checks use the observed
+value. Rejected foreign-session events do not change either active-session
+sequence value, and a sequence-1 `Reset` for a genuinely new session resets
+both values and clears segment state. Both values are exposed as read-only
+diagnostic state; the gate never mutates caption events.
 
 ## Caption source lifecycle contract
 

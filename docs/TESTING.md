@@ -101,6 +101,35 @@ The following root-level local runtime files are ignored and were not committed:
 - `/setting.json`
 - `/translation_history.db`
 
+## Stage 2A automated tests
+
+Command:
+
+```powershell
+dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
+```
+
+Result:
+
+- 48 passed
+- 0 failed
+- 0 skipped
+
+Coverage includes caption-event construction invariants, session and sequence
+ordering, segment and revision ordering, lifecycle progression, finalized
+segment protection, and committed/final translation-request identity.
+
+The tests are deterministic and do not launch Windows Live Captions, access UI
+Automation, create windows, call translation APIs, access the network, or use
+local settings or history files.
+
+The main application project excludes `tests/**/*.cs` from its default recursive
+compile items. Test dependencies are referenced only by the test project.
+
+Stage 2A does not change runtime behavior. Stage 2B runtime integration and its
+manual tests are pending. Stage 1 remains verified on Windows 10; Windows 11
+runtime verification remains pending.
+
 ## Future fixed audio fixtures
 
 To be defined in a later implementation stage. No fixture results are recorded

@@ -39,6 +39,10 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<Compile Remove="tests\**\*.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
 	  <None Update="Properties\AssemblyInfo.tt">
 	    <Generator>TextTemplatingFileGenerator</Generator>
 	    <LastGenOutput>AssemblyInfo.cs</LastGenOutput>

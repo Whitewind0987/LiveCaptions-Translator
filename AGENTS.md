@@ -173,6 +173,18 @@ git diff --check
 git status --short
 ```
 
+The focused captioning contract tests are located in:
+
+```text
+tests/LiveCaptionsTranslator.Tests/
+```
+
+Run them with:
+
+```powershell
+dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
+```
+
 Existing baseline warnings must not be presented as newly introduced warnings.
 
 When warnings are relevant, distinguish between:

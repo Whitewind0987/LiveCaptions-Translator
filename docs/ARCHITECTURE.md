@@ -3,8 +3,8 @@
 ## Status
 
 This document records the planned architecture for the Windows 10/11-compatible
-fork. Stage 0 is documentation and baseline verification only. None of the
-architecture described below is implemented by Stage 0.
+fork. Stage 2A implements the source-independent caption contracts and ordering
+core described below. Runtime integration remains pending Stage 2B.
 
 ## Objective
 
@@ -100,8 +100,31 @@ testable as separate stages.
 
 ## Caption event lifecycle
 
-The worker will publish caption events with a stream/session identity and a
-monotonically increasing version or sequence value:
+Stage 2A defines immutable caption-event schema version 1. Each event contains:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `SchemaVersion` | `int` | Fixed at the currently supported value `1` |
+| `SessionId` | `Guid` | Identity created by each successful source start or restart |
+| `Sequence` | `long` | Monotonically increasing event order within a session |
+| `SegmentId` | `long` | Ordered recognized-speech segment identity |
+| `Revision` | `long` | Text revision within a segment |
+| `Kind` | `CaptionEventKind` | `Partial`, `Committed`, `Final`, or `Reset` |
+| `Text` | `string` | Recognized text, or empty text for `Reset` |
+| `AudioStartMilliseconds` | `long?` | Optional non-negative audio start position |
+| `AudioEndMilliseconds` | `long?` | Optional non-negative audio end position |
+| `EmittedAtUtc` | `DateTimeOffset` | Non-default UTC event emission timestamp |
+
+Event construction enforces these invariants:
+
+- schema version is exactly 1;
+- session identity is not empty and sequence is at least 1;
+- audio positions are non-negative and end is not earlier than start;
+- `Reset` uses empty text, segment 0, and revision 0;
+- text events use non-whitespace text, segment at least 1, and revision at
+  least 1.
+
+The event kinds represent this lifecycle:
 
 - **Partial** updates replace the current provisional text for a segment.
 - **Committed** updates identify text stable enough to enter the translation
@@ -110,8 +133,39 @@ monotonically increasing version or sequence value:
 - **Reset** invalidates the current provisional state after a restart, source
   change, discontinuity, or explicit reset.
 
-Consumers must apply events in order and ignore events from an obsolete session
-or older version. The exact schema and commit policy belong to later stages.
+`CaptionEventGate` enforces the following ordering independently of any source:
+
+- a sequence-1 `Reset` establishes each new session;
+- a newer `Reset` in the active session clears segment state;
+- delayed events and resets from obsolete sessions are rejected;
+- sequence values strictly increase within a session;
+- the first segment after reset is 1, segment identities never decrease or
+  skip, and a new segment starts only after the preceding segment is final;
+- the first segment revision is 1, revisions never decrease, and a newer
+  revision represents changed text;
+- events for the same segment and revision contain identical text;
+- lifecycle progression within one revision only moves forward from `Partial`
+  to `Committed` to `Final`, while intermediate states may be skipped;
+- no event updates a finalized segment.
+
+The gate exposes read-only diagnostic state and never mutates caption events.
+
+## Caption source lifecycle contract
+
+Stage 2A defines `ICaptionSource` without WPF, UI Automation, translation,
+Windows Live Captions, ASR, or IPC types. A source exposes a stable identifier,
+current state, latest failure reason, caption and status notifications,
+cancellation-aware start and stop operations, and asynchronous disposal.
+
+Source states are `Stopped`, `Starting`, `Running`, `Restarting`, `Unavailable`,
+`Faulted`, and `Stopping`. Start must be idempotent or reject duplicates
+predictably; stop is safe when already stopped; no event is emitted after stop
+completes; every successful start or restart creates a new session whose first
+event is `Reset` sequence 1.
+
+Stage 2A does not adapt Windows Live Captions or change application runtime
+behavior. Stage 2B will integrate the existing Windows Live Captions path with
+these contracts.
 
 ## Translation pipeline
 

@@ -2,14 +2,17 @@
 
 ## Repository state
 
-- Branch: `feature/win10-asr-backend`
+- Branch: `feature/caption-source-abstraction`
 - Baseline commit: `7a6fe4a5b294dacc4aa1b3666981d6c00dbcd183`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
 - Completed stages:
   - Stage 0 environment and baseline verification
   - Stage 1 optional Windows Live Captions startup, verified on Windows 10
-- Current status: Stage 1 is complete on Windows 10; Windows 11 runtime
-  behavior has not yet been verified
+  - Stage 2A source-independent contracts and event-ordering core
+- Current status: Stage 2A is implemented and automatically tested; Stage 2 as
+  a whole is not complete
+- Next task: Stage 2B, adapt the existing Windows Live Captions implementation
+  to the Stage 2A contracts
 
 ## Environment
 
@@ -91,6 +94,25 @@ The following root-level runtime files are ignored and were not committed:
 ### Known remaining Windows 10 incompatibility
 
 Windows 10 still has no real-time caption source. The application shows a
-warning and idles. A future stage will add local speech recognition. Stage 2
-has not begun.
+warning and idles. A future stage will add local speech recognition.
+
+## Stage 2A implementation
+
+Stage 2A adds source-independent captioning foundations under `src/captioning/`:
+
+- immutable and validated caption-event schema version 1;
+- `ICaptionSource`, source states, immutable status, and start-result models;
+- `CaptionEventGate` for session, sequence, segment, revision, and lifecycle
+  ordering;
+- immutable `CaptionTranslationRequest` identity derived only from committed or
+  final events;
+- a focused `net8.0-windows` xUnit test project with 48 passing tests.
+
+The contracts are not integrated into `Translator`, application startup,
+`LiveCaptionsHandler`, UI, or runtime loops. Existing Stage 1 behavior is
+unchanged. Stage 2B will implement the Windows Live Captions adapter and runtime
+integration.
+
+Stage 1 remains complete on Windows 10. Windows 11 runtime behavior remains
+unverified and no Windows 11 checks are recorded as passed.
 

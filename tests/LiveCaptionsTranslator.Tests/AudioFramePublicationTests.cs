@@ -8,6 +8,25 @@ namespace LiveCaptionsTranslator.Tests;
 public sealed class AudioFramePublicationTests
 {
     [Fact]
+    public async Task RepeatedSessionsDoNotAccumulateRetiredDispatchers()
+    {
+        var endpoints = new FakeAudioEndpointProvider();
+        var factory = new FakeAudioCaptureRuntimeFactory();
+        await using var service = new AudioCaptureService(endpoints, factory);
+
+        for (var index = 0; index < 25; index++)
+        {
+            Assert.True((await service.StartAsync(null, TestContext.Current.CancellationToken)).Success);
+            await service.StopAsync(TestContext.Current.CancellationToken);
+            Assert.True(service.RetiredPublicationDispatcherCount <= 1);
+        }
+
+        Assert.True((await service.StartAsync(null, TestContext.Current.CancellationToken)).Success);
+        Assert.Equal(0, service.RetiredPublicationDispatcherCount);
+        await service.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task DedicatedCaptureThreadCanExitWhenSubscriberSynchronouslyStops()
     {
         var runtime = new DedicatedThreadAudioCaptureRuntime();

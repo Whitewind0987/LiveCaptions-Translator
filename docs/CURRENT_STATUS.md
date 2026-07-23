@@ -2,8 +2,9 @@
 
 ## Repository state
 
-- Branch: `feature/win10-asr-backend`
+- Branch: `feature/asr-worker-ipc`
 - Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
+- Stage 4 starting commit: `04e4f2c95ac98a8c32dbb7ae34b1a679a52835ad`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
 - Completed stages:
   - Stage 0 environment and baseline verification
@@ -12,10 +13,12 @@
   - Stage 2B Windows Live Captions source adapter and production integration
   - Stage 3 WPF audio-capture foundation implementation, automated tests, and
     Windows 10 core real-audio acceptance
-- Current status: Stage 3 implementation is complete and its Windows 10 core
-  real-audio acceptance passed. Optional Windows 10 endpoint-selection and
-  device-loss checks and all Windows 11 Stage 3 runtime checks remain pending
-- Next stage: Stage 4 has not begun and must not begin without explicit approval
+  - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
+    foundation implementation and automated cross-process validation
+- Current status: Stage 4 implementation and automated validation are complete.
+  Real-audio IPC acceptance on Windows 10 and all Windows 11 Stage 4 runtime
+  checks remain pending
+- Next stage: Stage 5 has not begun and must not begin without explicit approval
 
 ## Environment
 
@@ -234,5 +237,37 @@ were deliberately not run:
 - endpoint disconnect or disable while capture is running.
 
 All Windows 11 Stage 3 runtime acceptance checks remain pending. Speech
-recognition is not implemented, and Stage 4 has not begun.
+recognition is not implemented; the following section records the completed
+Stage 4 transport foundation.
+
+## Stage 4 implementation
+
+Stage 4 adds protocol 1.0, two random current-user named pipes, nonce/session/PID
+authentication, explicit capability negotiation, normalized PCM transport,
+heartbeat, typed failures, bounded diagnostics, explicit restart, and owned-
+process cleanup. `AsrWorkerSupervisor`, `NamedPipeWorkerTransport`,
+`AudioFramePump`, and `AudioWorkerPipeline` keep transport, process, audio, and
+coordination responsibilities separate. The Stage 3 250-frame buffer remains
+the sole PCM backlog; completed publication dispatchers are pruned between
+repeated sessions.
+
+The separately built C++20 `LiveCaptionsAsrWorker.exe` uses Win32 pipes and
+parent monitoring, validates and discards normalized frames, reports bounded
+progress/final summaries, and shuts down cleanly. A host Job Object uses
+kill-on-close. Shared textual golden vectors are consumed by both languages.
+No third-party Stage 4 package, license, native DLL, or model binary was added;
+the compiled worker is a local ignored project artifact.
+
+Automated managed tests pass 228 tests with 0 failed and 0 skipped, preserving
+all 193 Stage 3 tests. The x64 worker and native test executable build with MSVC
+`/W4 /WX`; CTest passes 1 of 1. Real C++ cross-process probes passed for a
+100-frame synthetic stream, one explicit restart (100/100 aggregate frames,
+zero gaps), controlled unexpected worker exit, and deterministic Ctrl+C-
+equivalent cancellation. No worker remained after the probe runs.
+
+Windows 10 real Stage 3 audio through the Stage 4 worker, manual Ctrl+C,
+heartbeat observation, process-orphan checks, and matching capture/worker
+summaries remain pending. All Windows 11 Stage 4 runtime checks remain pending.
+Ordinary WPF startup is unchanged and does not construct capture or worker
+infrastructure. Stage 5 has not begun.
 

@@ -197,6 +197,29 @@ Build it with:
 dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
 ```
 
+The Stage 4 native worker and protocol tests are under `native/AsrWorker/`.
+Configure, build, and test with the checked-in CMake presets:
+
+```powershell
+cmake --preset windows-x64
+cmake --build --preset windows-x64-release
+ctest --preset windows-x64-release
+```
+
+Build and run the Stage 4 developer probe with an explicit worker path:
+
+```powershell
+dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker <path-to-LiveCaptionsAsrWorker.exe> --synthetic --duration 5
+```
+
+Any externally visible native worker protocol change must update the C# codec,
+C++ codec, `docs/IPC_PROTOCOL.md`, and shared vectors under
+`protocol/v1/test-vectors/` together. Ordinary application startup must not
+start capture or the worker until a later approved production integration
+stage. Process, Job Object, pipe, cancellation source, and long-lived task
+ownership must remain explicit and deterministically joined.
+
 Use the probe only for explicit interactive audio-capture verification. Unit
 tests must use generated audio and fake endpoint/capture runtimes rather than
 opening real devices. Ordinary WPF startup must not start audio capture until a

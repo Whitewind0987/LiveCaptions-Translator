@@ -366,3 +366,7 @@ FodyWeavers.xsd
 # Local runtime data
 /setting.json
 /translation_history.db
+
+# Stage 4 native worker and probe artifacts
+/native/AsrWorker/build/
+/tools/AsrWorkerProbe/*.wav

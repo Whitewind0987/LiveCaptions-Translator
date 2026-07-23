@@ -6,7 +6,9 @@ This document records the planned architecture for the Windows 10/11-compatible
 fork. Stage 2 implements and integrates the source-independent caption
 contracts and Windows Live Captions adapter. Stage 3 implements the WPF-owned
 WASAPI loopback capture, normalization, framing, and bounded-buffer foundation.
-IPC and speech recognition remain future stages.
+Stage 4 implements the separately built native worker-process boundary,
+versioned named-pipe IPC, supervision, and normalized-audio transport. Speech
+recognition remains a future stage.
 
 ## Objective
 
@@ -208,6 +210,48 @@ package brings the managed NAudio.Asio, NAudio.Core, NAudio.Midi, NAudio.Wasapi,
 NAudio.WinForms, and NAudio.WinMM 2.3.0 packages. It adds no new native binary;
 the seven compressed NuGet packages total approximately 705 KiB in the local
 package cache. Only the Windows adapter exposes NAudio device or capture types.
+
+## Stage 4 worker process and IPC foundation
+
+Stage 4 establishes the final process boundary without adding recognition. The
+WPF-side host creates one random full-duplex control pipe and one independent
+random host-to-worker audio pipe for each session, then launches exactly one
+explicitly located `LiveCaptionsAsrWorker.exe`. A random authentication nonce is
+inherited through a private environment value rather than exposed on the
+command line. Handshake validation binds both pipes to the new worker-session
+Guid, nonce, and owned process ID and negotiates protocol 1.0 plus the fixed
+Stage 3 audio format.
+
+The binary little-endian protocol uses a fixed envelope, bounded payloads,
+strict UTF-8, RFC 4122 Guid ordering, per-direction message sequences, typed
+failures, and explicit correlation IDs. It covers lifecycle, readiness,
+heartbeat, progress, errors, shutdown, normalized audio, and the existing
+caption-event schema. Shared C# and C++ golden vectors lock the wire layout. The
+complete byte contract is documented in `docs/IPC_PROTOCOL.md`.
+
+`AsrWorkerSupervisor` owns one process, two pipes, heartbeat, bounded process
+output, and deterministic cleanup. It exposes explicit restart but never loops
+automatically. A Windows Job Object with kill-on-close prevents an owned worker
+from surviving an abnormal host exit; the worker independently monitors the
+supplied parent PID. Graceful shutdown is bounded and forced termination targets
+only the owned process tree. Process, Job Object, pipe, cancellation source, and
+long-lived task ownership remain explicit.
+
+`AudioFramePump` consumes `AudioCaptureService.FrameBuffer` directly. It
+preserves order, reports source gaps and byte/frame totals, drains buffered data
+on normal completion, and performs one sequential audio-pipe write per frame.
+It creates no second PCM queue: Stage 3's fixed 250-frame drop-oldest buffer
+remains the sole audio backpressure boundary. Completed retired Stage 3 frame-
+publication dispatchers are pruned across repeated capture sessions so restart
+testing cannot grow their retained list without bound.
+
+The C++20 worker is built separately by CMake. It connects both Win32 pipes,
+authenticates, responds to heartbeat and lifecycle commands, validates the
+fixed 16 kHz mono PCM16 frame stream, maintains bounded counters, publishes
+progress every 50 frames, returns a final summary, and discards PCM. Stage 4
+adds no VAD, Whisper, CUDA, models, recognition, caption production, or ASR
+native DLL loaded by WPF. Stage 5 and Stage 6 remain future work. Ordinary WPF
+startup does not start audio capture or the worker.
 
 ## Caption event lifecycle
 

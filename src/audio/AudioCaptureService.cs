@@ -133,6 +133,10 @@ namespace LiveCaptionsTranslator.audio
                 }
             }
         }
+        internal int RetiredPublicationDispatcherCount
+        {
+            get { lock (stateLock) return retiredDispatchers.Count; }
+        }
 
         public async Task<AudioCaptureStartResult> StartAsync(
             string? savedEndpointId,
@@ -172,6 +176,7 @@ namespace LiveCaptionsTranslator.audio
             List<AudioCaptureStatus> statuses,
             CancellationToken cancellationToken)
         {
+            await PruneRetiredDispatchersAsync().ConfigureAwait(false);
             if (State == AudioCaptureState.Running)
             {
                 lock (stateLock)
@@ -623,6 +628,22 @@ namespace LiveCaptionsTranslator.audio
             }
 
             return failures.Count == 0 ? null : string.Join(" ", failures);
+        }
+
+        private async Task PruneRetiredDispatchersAsync()
+        {
+            FramePublicationDispatcher[] completed;
+            lock (stateLock)
+            {
+                completed = retiredDispatchers
+                    .Where(dispatcher => dispatcher.Completion.IsCompleted)
+                    .ToArray();
+                foreach (var dispatcher in completed)
+                    retiredDispatchers.Remove(dispatcher);
+            }
+
+            foreach (var dispatcher in completed)
+                await dispatcher.DisposeAsync().ConfigureAwait(false);
         }
 
         private static async Task<string?> CleanupFailedStartAsync(

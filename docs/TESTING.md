@@ -418,3 +418,176 @@ Stage 3 uses generated audio fixtures only. Recorded speech fixtures, IPC,
 workers, VAD, Whisper, caption generation, translation-version integration, and
 recognition quality or latency tests belong to later explicitly approved stages.
 
+## Stage 4 automated managed tests
+
+Commands:
+
+```powershell
+dotnet restore
+dotnet build
+dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.csproj
+dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
+dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
+```
+
+Current result:
+
+- 228 passed
+- 0 failed
+- 0 skipped
+- all existing 193 Stage 3 tests are preserved
+- no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
+
+Stage 4 coverage includes fixed envelope layout, RFC 4122 Guid ordering, typed
+invalid-magic/version/type/size failures, optional unknown messages, fragmented
+reads, truncated payloads, strict payload codecs, exact 700-byte audio frames,
+caption-event mapping, and bidirectional shared golden vectors. In-process
+two-pipe tests cover valid handshake, nonce/PID rejection, bounded connection
+timeout, and cancellation. Fake process/job/transport tests cover one process
+per start, duplicate start, explicit restart with fresh identities, typed
+unexpected exit, missing executable, subscriber isolation, no status after
+stop, and retained Job assignment. Audio-pump tests cover ordering, bytes,
+identity, gaps, completion drain, cancellation, stale-session rejection, and
+pipe failure without a second backlog. A repeated 25-session Stage 3 regression
+proves completed publication dispatchers do not accumulate.
+
+The normal xUnit suite uses fake processes/transports and in-process pipes. It
+does not launch the C++ worker, open WASAPI, start WPF, access the network, call
+translation providers, or read runtime settings/history files.
+
+## Stage 4 native build and tests
+
+The installed Visual Studio CMake is not on PATH. The equivalent full-path
+commands were run using CMake 4.2.3-msvc3, Visual Studio 18 2026, MSVC
+19.50.35728.0, and Windows SDK 10.0.26100.0 targeting Windows 10.0.19045:
+
+```powershell
+cmake --preset windows-x64
+cmake --build --preset windows-x64-release
+ctest --preset windows-x64-release
+```
+
+Results:
+
+- x64 configure: **passed**
+- `LiveCaptionsAsrWorker.exe` Release build with `/W4 /WX`: **passed**
+- native protocol-test Release build with `/W4 /WX`: **passed**
+- CTest: **1 passed, 0 failed**
+- new native warnings: **0**
+- ARM64 preset is documented but was not built locally: **pending**
+
+Native coverage includes envelope round-trip, partial/truncated input rejection,
+invalid magic, unsupported major, oversized payload, RFC Guid bytes, bounded
+UTF-8, audio metadata, sequence/sample-index validation, gap accounting,
+stream statistics, and availability of all ten shared vectors.
+
+Shared vectors are in:
+
+```text
+protocol/v1/test-vectors/protocol-v1.hex
+```
+
+They cover `WorkerHello`, `HostAccept`, `WorkerReady`, `StartAudioStream`, one
+exact `AudioFrame`, `AudioProgress`, `Error`, `CaptionEvent`, `Shutdown`, and
+`ShutdownAcknowledged`. C# tests encode and decode every vector; C++ tests read
+the same fixture and validate the common primitive and state-machine rules.
+
+## Stage 4 synthetic cross-process acceptance
+
+The real x64 C++ worker was exercised through the developer probe on Windows
+10. No system audio was opened.
+
+Baseline synthetic command:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 2
+```
+
+Result: **passed**. The host launched one owned native process, connected both
+random pipes, authenticated, negotiated protocol 1.0 with only `ProtocolV1`
+and `NormalizedPcmSink`, sent 100 frames, and received a final 100-frame summary
+with 0 gaps and 0 heartbeat failures. Shutdown was acknowledged, worker exit
+code was 0, and no worker remained.
+
+Explicit restart command:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 1 --restart
+```
+
+Result: **passed**. Exactly one explicit restart created a different worker
+session and different pipe identities. Across both sessions the probe generated
+100 frames and the workers reported 100 received, 0 gaps, 0 heartbeat failures,
+successful shutdown acknowledgment, and exit code 0. No automatic retry loop
+or orphan process was observed.
+
+Controlled-exit command:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 1 --controlled-exit
+```
+
+Result: **passed**. Terminating only the supervisor-owned worker became typed
+`WorkerExited`, did not hang, performed cleanup, and left no worker process.
+
+Deterministic Ctrl+C-equivalent command:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj --no-build -- --worker native/AsrWorker/build/x64/bin/LiveCaptionsAsrWorker.exe --synthetic --duration 5 --cancel-after-ms 500
+```
+
+Result: **passed** with exit code 0 and `Requested cancellation completed
+cleanly.` No worker process remained. Interactive keyboard Ctrl+C remains part
+of manual acceptance.
+
+## Stage 4 developer probe
+
+Synthetic, restart, controlled-exit, and deterministic cancellation modes are
+shown above. Real Stage 3 audio uses the production capture service, buffer,
+worker transport, and coordinator without WAV transport:
+
+```powershell
+dotnet run --project tools/AsrWorkerProbe/AsrWorkerProbe.csproj -- --worker <path-to-LiveCaptionsAsrWorker.exe> --audio --device default --duration 10
+```
+
+An explicit endpoint ID may replace `default`. The compiled native worker,
+CMake build tree, PDB files, and probe artifacts are ignored and must not be
+committed.
+
+## Stage 4 Windows 10 real-audio manual checklist
+
+Automated synthetic IPC passed, but the following real-system-audio checks are
+**pending**:
+
+- Native worker executable starts from the explicit path: **pending**
+- Both random pipes connect and authenticated handshake succeeds: **pending**
+- Heartbeat remains healthy during real capture: **pending**
+- Real Stage 3 default-device audio streams for ten seconds: **pending**
+- Capture frames sent approximately match worker frames received: **pending**
+- No unexpected sequence gaps occur: **pending**
+- Stage 3 bounded-buffer drops remain controlled: **pending**
+- `AudioStreamStopped` summary matches host diagnostics: **pending**
+- Interactive Ctrl+C shuts down capture, pump, pipes, and worker: **pending**
+- No `LiveCaptionsAsrWorker` process remains: **pending**
+- Controlled worker termination during real capture becomes a typed failure
+  without hanging WPF-side code: **pending**
+- Explicit restart during the real-audio probe creates a new worker session:
+  **pending**
+- No worker remains after every probe exit: **pending**
+
+Ordinary WPF startup remains unchanged and is not a Stage 4 worker owner. It
+must continue to start neither audio capture nor the worker.
+
+## Stage 4 Windows 11 manual checklist
+
+All equivalent Stage 4 native-worker, two-pipe handshake, heartbeat, real-audio
+streaming, summary, failure, restart, Ctrl+C, and orphan-process checks are
+**pending** on Windows 11. No Windows 11 Stage 4 result is inferred from Windows
+10 synthetic validation.
+
+## Stage 4 limitations
+
+Stage 4 has no VAD, Whisper, CUDA, models, recognition, generated captions,
+production `ICaptionSource`, Translator integration, translation changes, or
+packaging integration. Stage 5 has not begun.
+

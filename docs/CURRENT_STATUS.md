@@ -15,9 +15,10 @@
     Windows 10 core real-audio acceptance
   - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
     foundation implementation and automated cross-process validation
-- Current status: Stage 4 implementation, automated validation, and the Windows
-  10 default-device real-audio normal-stop path are complete. Remaining Windows
-  10 edge/manual checks and all Windows 11 Stage 4 runtime checks are pending
+- Current status: Stage 4 implementation, automated validation, and Windows 10
+  default-device real-audio normal-stop, controlled-exit, explicit-restart, and
+  interactive-cancellation acceptance are complete. All Windows 11 Stage 4
+  runtime checks remain pending
 - Next stage: Stage 5 has not begun and must not begin without explicit approval
 
 ## Environment
@@ -273,8 +274,9 @@ progress and stall bounds before sending stream-completion control messages.
 Owned cancellation joins a genuinely stalled pump without being misreported as
 the original failure, and caller cancellation cannot skip mandatory cleanup.
 
-Automated managed tests pass 283 tests with 0 failed and 0 skipped, preserving
-all 262 tests from the previous Stage 4 baseline and all 193 Stage 3 tests. The x64 worker and
+Automated managed tests pass 293 tests with 0 failed and 0 skipped, preserving
+all 275 tests from the immediately previous committed result and all 193 Stage
+3 tests. The x64 worker and
 native test executable build with MSVC `/W4 /WX`; CTest passes 1 of 1. Real C++
 cross-process probes pass a five-second 250-frame synthetic stream with a real
 heartbeat, one explicit restart (200/200 aggregate frames, zero gaps), typed
@@ -293,11 +295,20 @@ real capture and explicit real-audio restart now pass: controlled exit retains
 typed `WorkerExited`, joins capture/pump cleanup without forced termination or
 cleanup failures, and leaves no worker; the restart check is an explicit
 bounded two-session test (248 frames then 249) with different session IDs and
-PIDs, exact per-session capture/pump/transport/worker totals, and clean drains.
-This does not claim seamless mid-stream restart. Interactive Ctrl+C remains
-pending because the non-interactive validation host could not reliably deliver
-a genuine console Ctrl+C event. All Windows 11 Stage 4 runtime checks remain
-pending.
+observed PIDs 3652 and 16000, exact per-session capture/pump/transport/worker
+totals, and clean drains. PID inequality is diagnostic rather than mandatory:
+Windows may reuse a positive PID after the first worker has fully exited. This
+does not claim seamless mid-stream restart.
+
+Interactive Windows 10 Ctrl+C acceptance also passes. It produced 651 frames,
+dropped 28 through the bounded buffer, and consistently consumed, pumped,
+transported, and summarized 623 frames; source and worker-summary gaps both
+matched the 28 drops. The pump completed and joined after source completion
+without owned cancellation, the worker exited gracefully with code 0, forced
+termination was not used, cleanup/disposal failures were empty, and no owned
+PID remained. This is bounded-drop accounting and clean-interruption evidence,
+not zero-loss evidence; the separate 500/500 normal-stop run remains the strict
+zero-drop acceptance. All Windows 11 Stage 4 runtime checks remain pending.
 Ordinary WPF startup is unchanged and does not construct capture or worker
 infrastructure. Stage 5 has not begun.
 

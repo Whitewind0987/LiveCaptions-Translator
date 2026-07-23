@@ -432,10 +432,10 @@ dotnet build tools/AsrWorkerProbe/AsrWorkerProbe.csproj
 
 Current result:
 
-- 283 passed
+- 293 passed
 - 0 failed
 - 0 skipped
-- all existing 262 tests from before the normal-stop hardening are preserved
+- all 275 tests from the immediately previous committed result are preserved
 - all existing 193 Stage 3 tests are preserved
 - no new C# or xUnit analyzer diagnostic originates in Stage 4 source or tests
 
@@ -467,7 +467,11 @@ validation, typed root-cause retention, `AudioStreamEnd` ordering, and matching
 end/summary totals. Incomplete drains send neither `AudioStreamEnd` nor
 `StopAudioStream`, and every stop path proves the pump joined. Initial-gap tests count sequence 2/3 drops before the first
 sent frame. All earlier ordering, buffer, and repeated-session regressions are
-preserved.
+preserved. Probe acceptance tests separately cover clean cancellation with zero
+drops, internally consistent bounded drops/gaps, mismatched frame and gap
+totals, cleanup failure, disposal failure, forced termination, a remaining
+worker PID, legal PID reuse after the first worker has fully exited, and the
+requirement that the first worker exit before restart.
 
 The normal xUnit suite uses fake processes/transports and in-process pipes. It
 does not launch the C++ worker, open WASAPI, start WPF, access the network, call
@@ -613,7 +617,7 @@ remained after validation.
 - No unexpected sequence gaps occur: **passed** (0)
 - Stage 3 bounded-buffer drops remain controlled: **passed** (0)
 - `AudioStreamStopped` summary matches host diagnostics: **passed**
-- Interactive Ctrl+C shuts down capture, pump, pipes, and worker: **pending**
+- Interactive Ctrl+C shuts down capture, pump, pipes, and worker: **passed**
 - No `LiveCaptionsAsrWorker` process remains: **passed**
 - Controlled worker termination during real capture becomes a typed failure
   without hanging WPF-side code: **passed**
@@ -640,15 +644,31 @@ invalid frames, heartbeat failures, forced terminations, cleanup failures, or
 disposal failures, and ended `Stopped` with acknowledged graceful shutdown and
 exit code 0. No worker remained and the probe returned 0.
 
-Interactive Ctrl+C was attempted from the non-interactive validation host, but
-the host could not reliably deliver a genuine console Ctrl+C event; those
-attempts are not counted as passing. The deterministic cancellation probe still
-passes. Its real-audio run returned 0 after 341 capture, pump, transport, and
-worker-summary frames / 218,240 PCM bytes, with 0 buffered, dropped, gap, or
-invalid frames; capture and pipeline ended `Stopped`, the pump joined after
-source completion, graceful shutdown succeeded, forced termination was false,
-cleanup/disposal failures were empty, and no PID remained. An interactive
-terminal run remains required for the Ctrl+C item.
+The observed PIDs are retained for diagnostics, but numeric PID inequality is
+not an acceptance requirement because Windows may legally reuse a PID after the
+first process exits. Acceptance requires positive PIDs, different worker
+session IDs (with fresh nonce and pipe identities created by the explicit
+restart), proof that the first worker fully exited before session 2, and strict
+independent validation of both real-audio sessions.
+
+The Windows 10 interactive Ctrl+C run is accepted. Capture produced 651 frames,
+dropped 28 in the bounded buffer, and consumed 623. Pump, transport, and final
+worker-summary totals all matched the 623 consumed frames; pump source gaps and
+worker-summary gaps both matched the 28 dropped frames. The pump reached
+`Completed`, joined, observed source completion, and did not need owned
+cancellation. Capture and pipeline stopped without failure, the worker shut
+down gracefully with exit code 0, forced termination was false, cleanup and
+disposal failures were empty, and no owned PID remained. This verifies exact
+bounded-drop accounting and clean interruption; it is not a zero-loss result.
+The separate 500/500 normal-stop run remains the strict zero-drop and zero-gap
+real-audio acceptance.
+
+After the dedicated cancellation predicate was added, a deterministic Windows
+10 real-audio cancellation rerun also printed `Requested cancellation completed
+cleanly.`, returned 0, and left no process. It produced, consumed, pumped,
+transported, and summarized 344 frames / 220,160 PCM bytes with zero drops or
+gaps; cleanup and disposal failures were empty. This confirms the same final
+cleanup decision path without replacing the interactive Ctrl+C evidence above.
 
 Ordinary WPF startup remains unchanged and is not a Stage 4 worker owner. It
 must continue to start neither audio capture nor the worker.

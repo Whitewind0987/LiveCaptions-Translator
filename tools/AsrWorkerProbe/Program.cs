@@ -206,7 +206,7 @@ internal static class Program
         var final = sessions[^1];
         if (requestedCancellation)
         {
-            var accepted = IsCleanAudioSession(final, requireAudio: false);
+            var accepted = IsCleanCanceledAudioSession(final, disposalFailures.Count != 0);
             if (accepted) Console.WriteLine("Requested cancellation completed cleanly.");
             return accepted ? 0 : 1;
         }
@@ -216,10 +216,18 @@ internal static class Program
         {
             var first = sessions[0];
             var second = sessions[1];
-            var identitiesChanged = first.WorkerSessionId != Guid.Empty && second.WorkerSessionId != Guid.Empty &&
-                first.WorkerSessionId != second.WorkerSessionId && first.WorkerProcessId > 0 &&
-                second.WorkerProcessId > 0 && first.WorkerProcessId != second.WorkerProcessId;
-            return identitiesChanged && IsCleanAudioSession(first, requireAudio: true) && IsCleanAudioSession(second, requireAudio: true) ? 0 : 1;
+            var firstAccepted = IsCleanAudioSession(first, requireAudio: true);
+            var secondAccepted = IsCleanAudioSession(second, requireAudio: true);
+            var firstWorkerExited = first.Worker.State == AsrWorkerState.Stopped &&
+                first.Worker.ProcessExitCode.HasValue && first.Worker.WorkerPid == null;
+            return ProbeAcceptance.IsValidExplicitRestart(
+                first.WorkerSessionId,
+                first.WorkerProcessId,
+                firstWorkerExited,
+                firstAccepted,
+                second.WorkerSessionId,
+                second.WorkerProcessId,
+                secondAccepted) ? 0 : 1;
         }
         return IsCleanAudioSession(final, requireAudio: true) ? 0 : 1;
     }
@@ -281,6 +289,44 @@ internal static class Program
             worker.State == AsrWorkerState.Stopped && worker.FailureKind == AsrWorkerFailureKind.None &&
             worker.GracefulShutdownSucceeded && !worker.ForcedTerminationUsed && worker.ProcessExitCode == 0 &&
             worker.CleanupFailures.Count == 0 && worker.WorkerPid == null;
+    }
+
+    private static bool IsCleanCanceledAudioSession(AudioSessionSnapshot session, bool hasDisposalFailures)
+    {
+        var pipeline = session.Pipeline;
+        var capture = pipeline.Capture;
+        var pump = pipeline.Pump;
+        var summary = pipeline.WorkerSummary;
+        var worker = session.Worker;
+        if (pump == null || summary == null) return false;
+
+        return ProbeAcceptance.IsCleanCanceledAudioSession(new CanceledAudioSessionFacts(
+            capture.State == AudioCaptureState.Stopped,
+            pipeline.State == AudioWorkerPipelineState.Stopped,
+            pipeline.FailureKind != AsrWorkerFailureKind.None,
+            pump.Phase == AudioFramePumpPhase.Completed,
+            pipeline.PumpJoined,
+            pump.SourceCompletionObserved,
+            pump.OwnedCancellationUsed,
+            capture.FramesProduced,
+            capture.FramesConsumed,
+            capture.FramesDropped,
+            pump.FramesSent,
+            worker.AudioFramesSent,
+            summary.FramesReceived,
+            pump.BytesSent,
+            worker.AudioBytesSent,
+            summary.PcmBytesReceived,
+            pump.SourceSequenceGaps,
+            summary.SequenceGaps,
+            summary.InvalidFrames,
+            worker.HeartbeatFailures,
+            worker.GracefulShutdownSucceeded,
+            worker.ForcedTerminationUsed,
+            worker.ProcessExitCode,
+            pipeline.CleanupFailures.Count != 0 || worker.CleanupFailures.Count != 0,
+            hasDisposalFailures,
+            worker.WorkerPid.HasValue));
     }
 
     private static bool IsExpectedControlledExit(AudioSessionSnapshot session)

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Windows;
 
+using LiveCaptionsTranslator.lifecycle;
+
 namespace LiveCaptionsTranslator
 {
     public partial class App : Application
@@ -96,21 +98,17 @@ namespace LiveCaptionsTranslator
             if (Interlocked.Exchange(ref shutdownInvoked, 1) != 0)
                 return;
 
-            applicationCancellation.Cancel();
+            var failures = await ApplicationShutdownCoordinator.RunAsync(
+                applicationCancellation.Cancel,
+                backgroundLoops,
+                () => Translator.StopCaptionSourceAsync(CancellationToken.None),
+                Translator.DisposeCaptionSourceAsync).ConfigureAwait(false);
 
-            if (backgroundLoops.Length > 0)
+            foreach (var failure in failures)
             {
-                try
-                {
-                    await Task.WhenAll(backgroundLoops).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
+                Debug.WriteLine(
+                    $"Application shutdown phase '{failure.Phase}' failed: {failure.Exception}");
             }
-
-            await Translator.StopCaptionSourceAsync(CancellationToken.None).ConfigureAwait(false);
-            await Translator.DisposeCaptionSourceAsync().ConfigureAwait(false);
         }
     }
 }

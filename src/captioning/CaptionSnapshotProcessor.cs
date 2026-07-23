@@ -47,6 +47,7 @@ namespace LiveCaptionsTranslator.captioning
 
             var fullText = Preprocess(rawSnapshot);
             var clearContexts = fullText.IndexOfAny(TextUtil.PUNC_EOS) == -1 && contextCount > 0;
+            var effectiveContextCount = clearContexts ? 0 : contextCount;
 
             int lastEosIndex;
             if (Array.IndexOf(TextUtil.PUNC_EOS, fullText[^1]) != -1)
@@ -62,7 +63,7 @@ namespace LiveCaptionsTranslator.captioning
             }
 
             var overlayOriginalCaption = latestCaption;
-            for (var historyCount = Math.Min(displaySentenceCount, contextCount);
+            for (var historyCount = Math.Min(displaySentenceCount, effectiveContextCount);
                  historyCount > 0 && lastEosIndex > 0;
                  historyCount--)
             {

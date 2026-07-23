@@ -142,7 +142,7 @@ dotnet test tests/LiveCaptionsTranslator.Tests/LiveCaptionsTranslator.Tests.cspr
 
 Result:
 
-- 93 passed
+- 100 passed
 - 0 failed
 - 0 skipped
 
@@ -151,7 +151,14 @@ for `WindowsLiveCaptionsSource`, typed initialization/read/cleanup outcomes,
 ordered Reset and changed-snapshot Partial events, duplicate starts, subscriber
 isolation, controlled restart, cancellation during restart, stop/disposal,
 cleanup diagnostics, optional native-window control, `CaptionSourceHost` gate
-integration, atomic latest snapshots, and managed legacy caption processing.
+integration, atomic source-state/latest-snapshot reads, and managed legacy
+caption processing. Pre-acceptance regressions additionally verify that a
+faulted loop cannot skip source stop or disposal, all shutdown failures remain
+diagnosable, `Restarting`/`Unavailable`/`Faulted` states invalidate stale
+snapshots through the real Host-to-processor path, delayed inactive-source
+events cannot reactivate text, a new-session Reset plus Partial recovers
+normally, and context clearing precedes overlay history expansion while normal
+expansion remains intact.
 
 All Stage 2B source tests use fake runtimes, fake delays, and fake caption
 sources. They do not launch `LiveCaptions.exe`, access real UI Automation,

@@ -11,6 +11,7 @@ namespace LiveCaptionsTranslator.captioning
         long SessionGeneration);
 
     public sealed record CaptionSourceLatestState(
+        CaptionSourceState State,
         long SessionGeneration,
         AcceptedCaptionSnapshot? Snapshot);
 
@@ -22,7 +23,8 @@ namespace LiveCaptionsTranslator.captioning
         private readonly SemaphoreSlim lifecycleGate = new(1, 1);
 
         private AcceptedCaptionSnapshot? latestSnapshot;
-        private CaptionSourceStatus? latestStatus;
+        private CaptionSourceState sourceState;
+        private string? sourceFailureReason;
         private CaptionSourceStartResult? startResult;
         private string? lastGateRejectionReason;
         private long sessionGeneration;
@@ -33,6 +35,8 @@ namespace LiveCaptionsTranslator.captioning
         public CaptionSourceHost(ICaptionSource source)
         {
             this.source = source ?? throw new ArgumentNullException(nameof(source));
+            sourceState = source.State;
+            sourceFailureReason = source.FailureReason;
             source.CaptionEventReceived += OnCaptionEventReceived;
             source.StatusChanged += OnStatusChanged;
         }
@@ -42,7 +46,7 @@ namespace LiveCaptionsTranslator.captioning
             get
             {
                 lock (stateLock)
-                    return latestStatus?.State ?? source.State;
+                    return sourceState;
             }
         }
 
@@ -51,7 +55,7 @@ namespace LiveCaptionsTranslator.captioning
             get
             {
                 lock (stateLock)
-                    return latestStatus?.FailureReason ?? source.FailureReason;
+                    return sourceFailureReason;
             }
         }
 
@@ -76,7 +80,10 @@ namespace LiveCaptionsTranslator.captioning
         public CaptionSourceLatestState ReadLatestState()
         {
             lock (stateLock)
-                return new CaptionSourceLatestState(sessionGeneration, latestSnapshot);
+                return new CaptionSourceLatestState(
+                    sourceState,
+                    sessionGeneration,
+                    sourceState == CaptionSourceState.Running ? latestSnapshot : null);
         }
 
         public Guid? ActiveSessionId
@@ -199,7 +206,7 @@ namespace LiveCaptionsTranslator.captioning
                     sessionGeneration++;
                     latestSnapshot = null;
                 }
-                else
+                else if (sourceState == CaptionSourceState.Running)
                 {
                     latestSnapshot = new AcceptedCaptionSnapshot(
                         captionEvent.SessionId,
@@ -218,8 +225,21 @@ namespace LiveCaptionsTranslator.captioning
 
         private void OnStatusChanged(object? sender, CaptionSourceStatus status)
         {
+            var snapshotInvalidated = false;
             lock (stateLock)
-                latestStatus = status;
+            {
+                sourceState = status.State;
+                sourceFailureReason = status.FailureReason;
+
+                if (status.State != CaptionSourceState.Running && latestSnapshot != null)
+                {
+                    latestSnapshot = null;
+                    snapshotInvalidated = true;
+                }
+            }
+
+            if (snapshotInvalidated)
+                InvokeSafely(SnapshotChanged, null);
 
             InvokeSafely(StatusChanged, status);
         }

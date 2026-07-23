@@ -105,6 +105,75 @@ public sealed class CaptionSourceHostTests
         Assert.Equal(CaptionSourceState.Faulted, observed?.State);
     }
 
+    [Theory]
+    [InlineData(CaptionSourceState.Restarting)]
+    [InlineData(CaptionSourceState.Unavailable)]
+    [InlineData(CaptionSourceState.Faulted)]
+    public async Task InactiveStateInvalidatesSnapshotUntilNewSessionProducesText(
+        CaptionSourceState inactiveState)
+    {
+        var source = new FakeCaptionSource();
+        await using var host = new CaptionSourceHost(source);
+        var processor = new CaptionSnapshotProcessor();
+        await host.StartAsync();
+        source.Emit(CaptionEventFactory.Text(sequence: 2, text: "old unfinished caption"));
+
+        var runningState = host.ReadLatestState();
+        Assert.Equal(CaptionSourceState.Running, runningState.State);
+        Assert.True(processor.Tick(
+            runningState.SessionGeneration,
+            runningState.Snapshot?.Text,
+            0,
+            1,
+            100,
+            1).HasSnapshot);
+
+        source.SetStatus(inactiveState, "source disrupted");
+        source.Emit(CaptionEventFactory.Text(
+            sequence: 3,
+            revision: 2,
+            text: "delayed old caption"));
+
+        var inactiveSourceState = host.ReadLatestState();
+        var inactiveResult = processor.Tick(
+            inactiveSourceState.SessionGeneration,
+            inactiveSourceState.Snapshot?.Text,
+            0,
+            1,
+            100,
+            1);
+
+        Assert.Equal(inactiveState, inactiveSourceState.State);
+        Assert.Null(inactiveSourceState.Snapshot);
+        Assert.False(inactiveResult.HasSnapshot);
+        Assert.Null(inactiveResult.DisplayOriginalCaption);
+        Assert.Null(inactiveResult.OverlayOriginalCaption);
+        Assert.Null(inactiveResult.TranslationTextToEnqueue);
+        Assert.Equal(3, host.LastAcceptedSequence);
+
+        source.Emit(CaptionEventFactory.Reset(CaptionEventFactory.SessionB));
+        source.SetStatus(CaptionSourceState.Running);
+        source.Emit(CaptionEventFactory.Text(
+            sessionId: CaptionEventFactory.SessionB,
+            sequence: 2,
+            text: "new session caption"));
+
+        var recoveredState = host.ReadLatestState();
+        var recoveredResult = processor.Tick(
+            recoveredState.SessionGeneration,
+            recoveredState.Snapshot?.Text,
+            0,
+            1,
+            100,
+            1);
+
+        Assert.Equal(CaptionSourceState.Running, recoveredState.State);
+        Assert.Equal(2, recoveredState.SessionGeneration);
+        Assert.Equal("new session caption", recoveredState.Snapshot?.Text);
+        Assert.True(recoveredResult.SessionReset);
+        Assert.True(recoveredResult.HasSnapshot);
+    }
+
     [Fact]
     public async Task HostStartsAndStopsSourceExactlyOnce()
     {

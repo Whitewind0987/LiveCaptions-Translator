@@ -191,10 +191,22 @@ App lifecycle
 `Translator` constructs exactly one `WindowsLiveCaptionsSource` without native
 side effects. `App` explicitly starts the source before starting the three
 Translator loops, and cancels the loops, stops the source, and disposes its
-runtime during application exit. `CaptionSourceHost` subscribes before startup,
-passes every event through `CaptionEventGate`, and stores only one lock-protected
-latest accepted full-snapshot value. Rejected, stale, duplicate, and foreign-
-session events cannot replace that value.
+runtime during application exit. Shutdown observes every loop and independently
+attempts source stop and disposal even when loop cancellation, a managed loop,
+or an earlier cleanup phase fails. Phase-specific failures are retained for
+diagnostics, while `OnExit` and `ProcessExit` share the same idempotent shutdown
+operation.
+
+`CaptionSourceHost` subscribes before startup, passes every event through
+`CaptionEventGate`, and stores only one lock-protected latest accepted full-
+snapshot value. Source state, session generation, and the processable snapshot
+are read atomically. A snapshot is processable only while the source is
+`Running`; transitions to a non-running state clear it without advancing the
+session generation. Delayed events still pass through the gate but cannot
+restore a processable snapshot while the source is inactive. An accepted
+`Reset` remains the only event that advances the processing generation, and a
+new-session Reset establishes the replacement gate session. Rejected, stale,
+duplicate, and foreign-session events cannot replace that value.
 
 `LiveCaptionsRuntime` is the narrow Windows-specific boundary. It privately owns
 the UI Automation window and source-owned process identity and delegates the
@@ -212,6 +224,11 @@ Partials use segment 1, with sequence and revision increasing together. The
 Windows adapter deliberately does not invent `Committed` or `Final` events;
 Translator retains its existing punctuation, sentence extraction, sync-count,
 idle-count, and translation-queue commit heuristics.
+
+Managed snapshot processing preserves the legacy context-clear order. When a
+snapshot contains no end-of-sentence punctuation and existing contexts must be
+cleared, overlay history expansion uses an effective context count of zero for
+that tick; normal overlay expansion is unchanged when contexts remain valid.
 
 Unexpected native-window loss publishes `Restarting`, waits approximately two
 seconds, and performs one controlled initialization attempt. A successful

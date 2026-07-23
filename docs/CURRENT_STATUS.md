@@ -125,7 +125,15 @@ Stage 2B integrates the source contracts into production:
 - managed snapshot processing preserves the existing preprocessing,
   sentence-extraction, idle, sync, translation-queue, display, and overlay
   behavior;
-- a focused `net8.0-windows` xUnit suite now has 93 passing tests.
+- application shutdown now observes every background loop and still attempts
+  source stop and disposal after cancellation, loop, or earlier cleanup
+  failures, retaining phase-specific diagnostics;
+- source state, session generation, and processable snapshot are exposed as one
+  atomic Host value; any non-running state invalidates the stored snapshot so
+  stale text cannot overwrite warnings or enter the translation queue;
+- context clearing now takes effect before overlay history expansion by using
+  an effective context count of zero for that tick;
+- a focused `net8.0-windows` xUnit suite now has 100 passing tests.
 
 Known transitional behavior: `WindowsLiveCaptionsSource` emits changed complete
 raw snapshots as `Partial` events only. It deliberately emits no `Committed` or
@@ -135,5 +143,6 @@ later-stage responsibility.
 
 Stage 1 remains complete on Windows 10. Windows 11 runtime behavior remains
 unverified and no Windows 11 checks are recorded as passed. Stage 2B Windows 10
-and Windows 11 manual runtime verification is pending; Stage 3 has not begun.
+and Windows 11 manual runtime verification remains pending after this
+pre-acceptance hardening; Stage 3 has not begun.
 

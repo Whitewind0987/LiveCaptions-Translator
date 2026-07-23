@@ -85,6 +85,36 @@ public sealed class CaptionSnapshotProcessorTests
     }
 
     [Fact]
+    public void ContextClearUsesZeroEffectiveContextForOverlay()
+    {
+        var processor = new CaptionSnapshotProcessor();
+
+        var result = processor.Tick(1, "unfinished caption", 3, 2, 10, 10);
+
+        Assert.True(result.ClearContexts);
+        Assert.Equal("unfinished caption", result.OverlayOriginalCaption);
+    }
+
+    [Fact]
+    public void OverlayExpandsNormallyWhenContextsAreNotCleared()
+    {
+        var processor = new CaptionSnapshotProcessor();
+
+        var result = processor.Tick(
+            1,
+            "This is the previous sentence. This is the current sentence.",
+            1,
+            1,
+            10,
+            10);
+
+        Assert.False(result.ClearContexts);
+        Assert.Equal(
+            "This is the previous sentence. This is the current sentence.",
+            result.OverlayOriginalCaption);
+    }
+
+    [Fact]
     public void MissingSnapshotDoesNotEnqueueTranslation()
     {
         var processor = new CaptionSnapshotProcessor();

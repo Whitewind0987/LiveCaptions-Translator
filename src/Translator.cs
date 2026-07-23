@@ -184,6 +184,10 @@ namespace LiveCaptionsTranslator
                     Caption.OverlayNoticePrefix = "[Paused]";
                     Caption.OverlayCurrentTranslation = string.Empty;
                 }
+                else if (CaptionSourceState != CaptionSourceState.Running)
+                {
+                    // Source status owns the warning while no snapshot is processable.
+                }
                 else if (!string.IsNullOrEmpty(RegexPatterns.NoticePrefix().Replace(
                              translatedText, string.Empty).Trim()) &&
                          string.CompareOrdinal(Caption.TranslatedCaption, translatedText) != 0)

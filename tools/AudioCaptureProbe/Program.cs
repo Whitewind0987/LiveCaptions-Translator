@@ -1,5 +1,3 @@
-using System.Threading.Channels;
-
 using LiveCaptionsTranslator.audio;
 using LiveCaptionsTranslator.audio.diagnostics;
 using LiveCaptionsTranslator.audio.windows;
@@ -31,77 +29,41 @@ internal static class AudioCaptureProbeProgram
         Console.CancelKeyPress += handler;
         try
         {
-            using var duration = AudioProbeDuration.Create(
-                TimeSpan.FromSeconds(durationSeconds),
-                ctrlC.Token);
             await using var service = new AudioCaptureService(
                 new WindowsAudioEndpointProvider(),
                 new WasapiLoopbackCaptureRuntimeFactory());
-
-            var result = await service.StartAsync(
-                string.Equals(device, "default", StringComparison.OrdinalIgnoreCase) ? null : device,
-                duration.Token);
-            if (!result.Success)
-            {
-                Console.Error.WriteLine($"Capture start failed: {result.FailureReason}");
-                return 1;
-            }
-
-            var startedDiagnostics = service.Diagnostics;
-            Console.WriteLine($"Endpoint: {result.Endpoint!.DisplayName}");
-            Console.WriteLine($"Endpoint ID: {result.Endpoint.Id}");
-            Console.WriteLine($"Session: {result.SessionId}");
-            Console.WriteLine($"Input: {startedDiagnostics.InputFormat}");
-            Console.WriteLine($"Normalized: {NormalizedAudioFormat.Description}");
-            if (!string.IsNullOrWhiteSpace(result.Diagnostic))
-                Console.WriteLine($"Resolution: {result.Diagnostic}");
-
-            NormalizedWaveFileWriter? writer = wavPath == null
+            IAudioProbeWaveWriter? writer = wavPath == null
                 ? null
                 : new NormalizedWaveFileWriter(wavPath);
-            var levels = new AudioLevelAccumulator();
-            try
-            {
-                while (!duration.IsCancellationRequested)
-                {
-                    NormalizedAudioFrame frame;
-                    try
-                    {
-                        frame = await service.FrameBuffer.ReadAsync(duration.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (ChannelClosedException)
-                    {
-                        break;
-                    }
+            var result = await AudioProbeRunner.RunAsync(
+                service,
+                string.Equals(device, "default", StringComparison.OrdinalIgnoreCase) ? null : device,
+                TimeSpan.FromSeconds(durationSeconds),
+                writer,
+                ctrlC.Token);
 
-                    levels.AddFrame(frame);
-                    if (writer != null)
-                        await writer.WriteAsync(frame, duration.Token);
-                }
-            }
-            finally
+            if (result.StartResult?.Success == true)
             {
-                if (writer != null)
-                    await writer.DisposeAsync();
-                var finalDiagnostics = service.Diagnostics;
-                var finalLevels = levels.Snapshot();
-                await service.StopAsync(CancellationToken.None);
-                Console.WriteLine($"Frames produced: {finalDiagnostics.FramesProduced}");
-                Console.WriteLine($"Frames consumed: {finalDiagnostics.FramesConsumed}");
-                Console.WriteLine($"Frames dropped: {finalDiagnostics.FramesDropped}");
-                Console.WriteLine($"Captured duration: {finalDiagnostics.FramesConsumed * 0.02:F2} s");
-                Console.WriteLine($"RMS: {finalLevels.Rms:F6}");
-                Console.WriteLine($"Peak: {finalLevels.Peak:F6}");
-                Console.WriteLine($"Failure: {finalDiagnostics.LastFailureReason ?? "none"}");
-                if (wavPath != null)
-                    Console.WriteLine($"WAV: {Path.GetFullPath(wavPath)}");
+                Console.WriteLine($"Endpoint: {result.StartResult.Endpoint!.DisplayName}");
+                Console.WriteLine($"Endpoint ID: {result.StartResult.Endpoint.Id}");
+                Console.WriteLine($"Session: {result.StartResult.SessionId}");
+                Console.WriteLine($"Input: {result.StartedDiagnostics?.InputFormat}");
+                Console.WriteLine($"Normalized: {NormalizedAudioFormat.Description}");
+                if (!string.IsNullOrWhiteSpace(result.StartResult.Diagnostic))
+                    Console.WriteLine($"Resolution: {result.StartResult.Diagnostic}");
             }
+            Console.WriteLine($"Final state: {result.FinalDiagnostics.State}");
+            Console.WriteLine($"Frames produced: {result.FinalDiagnostics.FramesProduced}");
+            Console.WriteLine($"Frames consumed: {result.FinalDiagnostics.FramesConsumed}");
+            Console.WriteLine($"Frames dropped: {result.FinalDiagnostics.FramesDropped}");
+            Console.WriteLine($"Captured duration: {result.FinalDiagnostics.FramesConsumed * 0.02:F2} s");
+            Console.WriteLine($"RMS: {result.Levels.Rms:F6}");
+            Console.WriteLine($"Peak: {result.Levels.Peak:F6}");
+            Console.WriteLine($"Failure: {result.FailureReason ?? "none"}");
+            if (wavPath != null)
+                Console.WriteLine($"WAV: {Path.GetFullPath(wavPath)}");
 
-            return 0;
+            return result.ExitCode;
         }
         catch (OperationCanceledException)
         {

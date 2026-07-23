@@ -206,6 +206,11 @@ NAudio belongs only at the narrow Windows endpoint-enumeration and WASAPI
 runtime boundary. UI, buffering, normalization contracts, and tests must not
 expose or depend on NAudio device objects.
 
+Audio frame/status subscribers must never run while an internal lock or
+lifecycle gate is held. Terminal callback failures and unexpected native stops
+must share one stored cleanup operation that `StopAsync` and `DisposeAsync`
+join; cleanup errors must be aggregated rather than discarded.
+
 Existing baseline warnings must not be presented as newly introduced warnings.
 
 When warnings are relevant, distinguish between:

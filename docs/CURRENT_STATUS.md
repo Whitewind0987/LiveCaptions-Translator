@@ -175,12 +175,23 @@ ordinary application startup or caption production:
   RMS/peak reporting, and optional normalized WAV output;
 - deterministic tests using synthetic audio and fake runtimes only.
 
-The combined test suite currently passes 166 tests with 0 failed and 0 skipped,
+The combined test suite currently passes 182 tests with 0 failed and 0 skipped,
 preserving all 100 Stage 2 tests. The main application build retains the existing
 378 reported warnings (189 unique diagnostics); Stage 3 introduces no new main-
 project warnings. A probe-project build may report the same 189 diagnostics
 while rebuilding its main-project reference; no warning originates in the probe
 or new Stage 3 audio source.
+
+Remote-review hardening now ensures that no frame or status subscriber runs
+while an internal lock or lifecycle gate is held. Active callback/publication
+work participates in a generation-aware stop barrier, including synchronous
+subscriber-initiated stops. Processing failures and unexpected native stops use
+one stored cleanup operation that is joined by stop and disposal, publishes one
+terminal state, and retains the original failure plus all independent stop,
+detach, capture-disposal, and endpoint-disposal failures. The developer probe
+now finalizes WAV output and joins service cleanup on every path, reports final
+post-cleanup diagnostics, and returns nonzero for unexpected capture, WAV, or
+cleanup failures.
 
 NAudio is pinned to 2.3.0 and is used only at the Windows audio boundary. It and
 its six 2.3.0 managed transitive packages are MIT licensed, add no new native

@@ -61,6 +61,7 @@ internal sealed class FakeAudioCaptureRuntime : IAudioCaptureRuntime
         new AudioInputFormat(16000, 1, 16, 2, AudioSampleEncoding.PcmSignedInteger));
     internal Exception? StartException { get; set; }
     internal Exception? StopException { get; set; }
+    internal Exception? DisposeException { get; set; }
     internal int OpenCount { get; private set; }
     internal int StartCount { get; private set; }
     internal int StopCount { get; private set; }
@@ -102,7 +103,9 @@ internal sealed class FakeAudioCaptureRuntime : IAudioCaptureRuntime
     public ValueTask DisposeAsync()
     {
         DisposeCount++;
-        return ValueTask.CompletedTask;
+        return DisposeException == null
+            ? ValueTask.CompletedTask
+            : ValueTask.FromException(DisposeException);
     }
 }
 

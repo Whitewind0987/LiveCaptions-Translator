@@ -233,7 +233,7 @@ dotnet build tools/AudioCaptureProbe/AudioCaptureProbe.csproj
 
 Current result:
 
-- 166 passed
+- 182 passed
 - 0 failed
 - 0 skipped
 - all existing 100 Stage 2 tests are preserved
@@ -255,6 +255,18 @@ duplicate and concurrent lifecycle calls, expected and unexpected native stops,
 device-unavailable and faulted outcomes, stale callback rejection, subscriber
 isolation, cleanup, RMS/peak calculation, WAV finalization, and bounded probe
 duration.
+
+The remote-review regression set additionally covers synchronous `StopAsync`
+from frame and status subscribers, stop waiting for an active publication,
+terminal-stop races with active data processing, absence of frames after a
+terminal status, one-shot cleanup after processing failure, repeated-failure
+deduplication, buffer completion, original-plus-cleanup diagnostic retention,
+stop failure followed by disposal, disposal failure retention, failed-start
+cleanup aggregation, and independent capture/device cleanup attempts. Probe
+regressions verify nonzero exit for unexpected `Unavailable`/`Faulted` closure,
+zero exit for requested bounded or Ctrl+C-equivalent cancellation, WAV
+finalization on failure, and final diagnostics being sampled only after service
+stop/cleanup completes.
 
 All audio samples are generated in memory and all service tests use fake
 endpoint providers and capture runtimes. Automated tests do not enumerate or

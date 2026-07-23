@@ -203,15 +203,233 @@ public sealed class AudioCaptureServiceTests
         Assert.Equal(1, endpoints.DisposeCount);
     }
 
+    [Fact]
+    public async Task FrameSubscriberCanSynchronouslyStopWithoutDeadlock()
+    {
+        await using var service = CreateService(out _, out var factory);
+        await service.StartAsync(null);
+        service.FrameProduced += (_, _) => service.StopAsync().GetAwaiter().GetResult();
+
+        await Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame()))
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(AudioCaptureState.Stopped, service.State);
+        Assert.Equal(1, factory.Created.Single().StopCount);
+        Assert.Equal(1, factory.Created.Single().DisposeCount);
+    }
+
+    [Fact]
+    public async Task StatusSubscriberCanSynchronouslyStopWithoutPublishingLaterStartStatus()
+    {
+        await using var service = CreateService(out _, out _);
+        var statuses = new List<AudioCaptureState>();
+        service.StatusChanged += (_, status) =>
+        {
+            statuses.Add(status.State);
+            if (status.State == AudioCaptureState.Starting)
+                service.StopAsync().GetAwaiter().GetResult();
+        };
+
+        await service.StartAsync(null).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(AudioCaptureState.Stopped, service.State);
+        Assert.DoesNotContain(AudioCaptureState.Running, statuses);
+    }
+
+    [Fact]
+    public async Task StopWaitsForActivePublicationAndNoEventOccursAfterReturn()
+    {
+        await using var service = CreateService(out _, out var factory);
+        await service.StartAsync(null);
+        var publicationEntered = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePublication = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var eventCount = 0;
+        service.FrameProduced += (_, _) =>
+        {
+            Interlocked.Increment(ref eventCount);
+            publicationEntered.TrySetResult(null);
+            releasePublication.Task.GetAwaiter().GetResult();
+        };
+
+        var callback = Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame()));
+        await publicationEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var stop = service.StopAsync();
+        Assert.False(stop.IsCompleted);
+        releasePublication.TrySetResult(null);
+        await Task.WhenAll(callback, stop).WaitAsync(TimeSpan.FromSeconds(2));
+        factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame());
+        Assert.Equal(1, Volatile.Read(ref eventCount));
+    }
+
+    [Fact]
+    public async Task UnexpectedStopRacingProcessingPublishesNoFrameAfterTerminalStatus()
+    {
+        var processingEntered = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProcessing = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var service = CreateService(
+            out _, out var factory, beforeProcessing: () =>
+            {
+                processingEntered.TrySetResult(null);
+                releaseProcessing.Task.GetAwaiter().GetResult();
+            });
+        await service.StartAsync(null);
+        var terminalPublished = false;
+        var framesAfterTerminal = 0;
+        var terminal = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.StatusChanged += (_, status) =>
+        {
+            if (status.State == AudioCaptureState.Unavailable)
+            {
+                terminalPublished = true;
+                terminal.TrySetResult(null);
+            }
+        };
+        service.FrameProduced += (_, _) =>
+        {
+            if (terminalPublished)
+                Interlocked.Increment(ref framesAfterTerminal);
+        };
+
+        var callback = Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame()));
+        await processingEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        factory.Created.Single().EmitStopped(AudioRuntimeStopReason.Unavailable, "device lost");
+        Assert.False(terminal.Task.IsCompleted);
+        releaseProcessing.TrySetResult(null);
+        await Task.WhenAll(callback, terminal.Task).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, framesAfterTerminal);
+        Assert.Equal(AudioCaptureState.Unavailable, service.State);
+    }
+
+    [Fact]
+    public async Task ProcessingFailureSchedulesExactlyOneTerminalCleanup()
+    {
+        await using var service = CreateService(
+            out _, out var factory, beforeProcessing: () => throw new InvalidOperationException("decode failed"));
+        await service.StartAsync(null);
+        var terminal = TerminalStatus(service, AudioCaptureState.Faulted);
+
+        await Task.WhenAll(
+            Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame())),
+            Task.Run(() => factory.Created.Single().EmitData(AudioTestData.ConstantPcm16Frame())));
+        await terminal.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, factory.Created.Single().StopCount);
+        Assert.Equal(1, factory.Created.Single().DisposeCount);
+        Assert.True(service.FrameBuffer.IsCompleted);
+    }
+
+    [Fact]
+    public async Task ProcessingFailureRetainsOriginalAndCleanupFailures()
+    {
+        var runtime = new FakeAudioCaptureRuntime
+        {
+            StopException = new InvalidOperationException("stop cleanup failed"),
+            DisposeException = new InvalidOperationException("dispose cleanup failed")
+        };
+        await using var service = CreateService(
+            out _, out _, runtime, () => throw new InvalidOperationException("processing failed"));
+        await service.StartAsync(null);
+        var terminal = TerminalStatus(service, AudioCaptureState.Faulted);
+        runtime.EmitData(AudioTestData.ConstantPcm16Frame());
+        await terminal.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Contains("processing failed", service.FailureReason);
+        Assert.Contains("stop cleanup failed", service.FailureReason);
+        Assert.Contains("dispose cleanup failed", service.FailureReason);
+        Assert.True(service.FrameBuffer.IsCompleted);
+    }
+
+    [Fact]
+    public async Task StopFailureStillDisposesRuntimeAndIsRetained()
+    {
+        var runtime = new FakeAudioCaptureRuntime
+        {
+            StopException = new InvalidOperationException("stop failed")
+        };
+        await using var service = CreateService(out _, out _, runtime);
+        await service.StartAsync(null);
+        await service.StopAsync();
+        Assert.Equal(1, runtime.DisposeCount);
+        Assert.Contains("stop failed", service.FailureReason);
+    }
+
+    [Fact]
+    public async Task RuntimeDisposalFailureIsRetained()
+    {
+        var runtime = new FakeAudioCaptureRuntime
+        {
+            DisposeException = new InvalidOperationException("dispose failed")
+        };
+        await using var service = CreateService(out _, out _, runtime);
+        await service.StartAsync(null);
+        await service.StopAsync();
+        Assert.Contains("dispose failed", service.FailureReason);
+    }
+
+    [Fact]
+    public async Task FailedStartRetainsOriginalStopAndDisposalFailures()
+    {
+        var runtime = new FakeAudioCaptureRuntime
+        {
+            OpenResult = AudioRuntimeOpenResult.Failed(AudioCaptureState.Faulted, "open failed"),
+            StopException = new InvalidOperationException("stop failed"),
+            DisposeException = new InvalidOperationException("dispose failed")
+        };
+        await using var service = CreateService(out _, out _, runtime);
+        var result = await service.StartAsync(null);
+        Assert.Contains("open failed", result.FailureReason);
+        Assert.Contains("stop failed", result.FailureReason);
+        Assert.Contains("dispose failed", result.FailureReason);
+    }
+
+    [Fact]
+    public async Task TerminalStatusIsPublishedExactlyOnceForRepeatedFailures()
+    {
+        await using var service = CreateService(
+            out _, out var factory, beforeProcessing: () => throw new InvalidOperationException("failed"));
+        await service.StartAsync(null);
+        var terminalCount = 0;
+        var terminal = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.StatusChanged += (_, status) =>
+        {
+            if (status.State == AudioCaptureState.Faulted)
+            {
+                Interlocked.Increment(ref terminalCount);
+                terminal.TrySetResult(null);
+            }
+        };
+        var runtime = factory.Created.Single();
+        runtime.EmitData(AudioTestData.ConstantPcm16Frame());
+        runtime.EmitData(AudioTestData.ConstantPcm16Frame());
+        runtime.EmitStopped(AudioRuntimeStopReason.Faulted, "also failed");
+        await terminal.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, terminalCount);
+        Assert.Equal(1, runtime.StopCount);
+        Assert.Equal(1, runtime.DisposeCount);
+    }
+
     private static AudioCaptureService CreateService(
         out FakeAudioEndpointProvider endpoints,
         out FakeAudioCaptureRuntimeFactory factory,
-        FakeAudioCaptureRuntime? runtime = null)
+        FakeAudioCaptureRuntime? runtime = null,
+        Action? beforeProcessing = null)
     {
         endpoints = new FakeAudioEndpointProvider();
         factory = new FakeAudioCaptureRuntimeFactory();
         if (runtime != null)
             factory.Enqueue(runtime);
-        return new AudioCaptureService(endpoints, factory);
+        return new AudioCaptureService(endpoints, factory, beforeProcessing);
+    }
+
+    private static Task TerminalStatus(AudioCaptureService service, AudioCaptureState expected)
+    {
+        var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.StatusChanged += (_, status) =>
+        {
+            if (status.State == expected)
+                completion.TrySetResult(null);
+        };
+        return completion.Task;
     }
 }

@@ -5,6 +5,21 @@ namespace LiveCaptionsTranslator.audio.diagnostics
 {
     public readonly record struct AudioLevelStatistics(double Rms, double Peak);
 
+    public interface IAudioProbeWaveWriter : IAsyncDisposable
+    {
+        Task WriteAsync(
+            NormalizedAudioFrame frame,
+            CancellationToken cancellationToken = default);
+    }
+
+    public sealed record AudioProbeRunResult(
+        int ExitCode,
+        AudioCaptureStartResult? StartResult,
+        AudioCaptureDiagnostics? StartedDiagnostics,
+        AudioCaptureDiagnostics FinalDiagnostics,
+        AudioLevelStatistics Levels,
+        string? FailureReason);
+
     public sealed class AudioLevelAccumulator
     {
         private double sumSquares;
@@ -44,7 +59,7 @@ namespace LiveCaptionsTranslator.audio.diagnostics
         }
     }
 
-    public sealed class NormalizedWaveFileWriter : IAsyncDisposable
+    public sealed class NormalizedWaveFileWriter : IAudioProbeWaveWriter
     {
         private readonly FileStream stream;
         private long dataLength;
@@ -109,6 +124,119 @@ namespace LiveCaptionsTranslator.audio.diagnostics
             {
                 await stream.DisposeAsync().ConfigureAwait(false);
             }
+        }
+    }
+
+    public static class AudioProbeRunner
+    {
+        public static Task<AudioProbeRunResult> RunAsync(
+            AudioCaptureService service,
+            string? savedEndpointId,
+            TimeSpan duration,
+            IAudioProbeWaveWriter? writer = null,
+            CancellationToken cancellationToken = default) =>
+            RunAsync(service, savedEndpointId, duration, writer, cancellationToken, null);
+
+        internal static async Task<AudioProbeRunResult> RunAsync(
+            AudioCaptureService service,
+            string? savedEndpointId,
+            TimeSpan duration,
+            IAudioProbeWaveWriter? writer,
+            CancellationToken cancellationToken,
+            Func<AudioCaptureService, Task>? afterStart)
+        {
+            ArgumentNullException.ThrowIfNull(service);
+            using var durationCancellation = AudioProbeDuration.Create(duration, cancellationToken);
+            var levels = new AudioLevelAccumulator();
+            AudioCaptureStartResult? startResult = null;
+            AudioCaptureDiagnostics? startedDiagnostics = null;
+            string? runFailure = null;
+            try
+            {
+                startResult = await service.StartAsync(savedEndpointId, durationCancellation.Token)
+                    .ConfigureAwait(false);
+                if (!startResult.Success)
+                {
+                    runFailure = startResult.FailureReason ?? "Audio capture failed to start.";
+                }
+                else
+                {
+                    startedDiagnostics = service.Diagnostics;
+                    if (afterStart != null)
+                        await afterStart(service).ConfigureAwait(false);
+                    while (!durationCancellation.IsCancellationRequested)
+                    {
+                        NormalizedAudioFrame frame;
+                        try
+                        {
+                            frame = await service.FrameBuffer.ReadAsync(durationCancellation.Token)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (durationCancellation.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        catch (System.Threading.Channels.ChannelClosedException)
+                        {
+                            runFailure = service.FailureReason ??
+                                "Audio frame buffer closed before the requested capture completed.";
+                            break;
+                        }
+
+                        levels.AddFrame(frame);
+                        if (writer != null)
+                            await writer.WriteAsync(frame, durationCancellation.Token).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (durationCancellation.IsCancellationRequested)
+            {
+                // Requested duration or external cancellation is a clean termination.
+            }
+            catch (Exception ex)
+            {
+                runFailure = $"Audio probe failed: {ex.Message}";
+            }
+            finally
+            {
+                if (writer != null)
+                {
+                    try { await writer.DisposeAsync().ConfigureAwait(false); }
+                    catch (Exception ex)
+                    {
+                        runFailure = Combine(runFailure, $"WAV finalization failed: {ex.Message}");
+                    }
+                }
+
+                try { await service.StopAsync(CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    runFailure = Combine(runFailure, $"Capture cleanup failed: {ex.Message}");
+                }
+            }
+
+            var finalDiagnostics = service.Diagnostics;
+            if (finalDiagnostics.State is AudioCaptureState.Unavailable or AudioCaptureState.Faulted)
+                runFailure = Combine(runFailure, finalDiagnostics.LastFailureReason);
+            else if (!string.IsNullOrWhiteSpace(finalDiagnostics.LastFailureReason))
+                runFailure = Combine(runFailure, finalDiagnostics.LastFailureReason);
+
+            return new AudioProbeRunResult(
+                string.IsNullOrWhiteSpace(runFailure) ? 0 : 1,
+                startResult,
+                startedDiagnostics,
+                finalDiagnostics,
+                levels.Snapshot(),
+                runFailure);
+        }
+
+        private static string? Combine(string? first, string? second)
+        {
+            if (string.IsNullOrWhiteSpace(first))
+                return second;
+            if (string.IsNullOrWhiteSpace(second) || first.Contains(second, StringComparison.Ordinal))
+                return first;
+            return $"{first} {second}";
         }
     }
 }

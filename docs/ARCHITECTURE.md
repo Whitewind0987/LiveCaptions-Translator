@@ -152,6 +152,24 @@ states retain explicit reasons. Stop and asynchronous disposal independently
 attempt native cleanup and are safe to repeat. Device loss becomes an explicit
 unavailable or faulted status rather than an exception escaping a callback.
 
+Callback processing is serialized per capture session, but frame and status
+subscribers are always invoked after internal locks and lifecycle gates have
+been released. A generation-aware activity/publication barrier invalidates new
+work when stop or failure begins and lets cleanup join work already in flight.
+It also permits a subscriber to call `StopAsync` synchronously without waiting
+on its own publication; the invalidated generation prevents any later handler,
+frame, or stale callback from being published after that stop completes.
+
+The first normalization failure or unexpected native stop reserves one terminal
+cleanup operation. That stored operation completes the frame buffer, rejects
+later callbacks, waits for active processing/publication where required, stops
+and disposes the runtime, clears streaming remainder, aggregates the original
+failure with every cleanup failure, and publishes exactly one terminal state.
+`StopAsync` and `DisposeAsync` join that same operation. Native cleanup clears
+owned fields first and independently attempts stop, both handler detachments,
+capture disposal, and endpoint disposal, so one cleanup error cannot suppress a
+later action or its diagnostic.
+
 Ordinary application startup deliberately does not construct or start
 `AudioCaptureService`. Stage 3 exposes the capture foundation and a separate
 developer probe, but production capture will begin only when a future IPC

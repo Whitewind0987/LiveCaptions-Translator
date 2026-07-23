@@ -11,6 +11,32 @@ namespace LiveCaptionsTranslator.audio.windows
         public IAudioCaptureRuntime Create() => new WasapiLoopbackCaptureRuntime();
     }
 
+    internal sealed record NativeCleanupStep(string Name, Action Action);
+
+    internal sealed record NativeCleanupResult(IReadOnlyList<string> Failures)
+    {
+        internal bool Success => Failures.Count == 0;
+        internal string? FailureReason => Success ? null : string.Join(" ", Failures);
+    }
+
+    internal static class NativeCleanupCoordinator
+    {
+        internal static NativeCleanupResult Run(params NativeCleanupStep[] steps)
+        {
+            var failures = new List<string>();
+            foreach (var step in steps)
+            {
+                try { step.Action(); }
+                catch (Exception ex) { failures.Add($"{step.Name} failed: {Describe(ex)}"); }
+            }
+            return new NativeCleanupResult(failures);
+        }
+
+        private static string Describe(Exception exception) => exception is AggregateException aggregate
+            ? string.Join(" ", aggregate.Flatten().InnerExceptions.Select(Describe))
+            : exception.Message;
+    }
+
     public sealed class WasapiLoopbackCaptureRuntime : IAudioCaptureRuntime
     {
         private const int AudclntDeviceInvalidated = unchecked((int)0x88890004);
@@ -62,10 +88,12 @@ namespace LiveCaptionsTranslator.audio.windows
                 }
                 catch (Exception ex)
                 {
-                    CleanupNative();
+                    var cleanup = CleanupNative(stopRecording: false);
                     return AudioRuntimeOpenResult.Failed(
                         IsDeviceUnavailable(ex) ? AudioCaptureState.Unavailable : AudioCaptureState.Faulted,
-                        $"Unable to open WASAPI loopback capture for '{endpoint.DisplayName}': {ex.Message}");
+                        Combine(
+                            $"Unable to open WASAPI loopback capture for '{endpoint.DisplayName}': {Describe(ex)}",
+                            cleanup.FailureReason));
                 }
             }
             finally
@@ -113,27 +141,21 @@ namespace LiveCaptionsTranslator.audio.windows
             await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                WasapiLoopbackCapture? current;
+                bool shouldStop;
                 lock (stateLock)
                 {
-                    current = capture;
+                    shouldStop = started;
                     expectedStop = true;
-                    started = false;
                 }
 
-                if (current != null)
+                var cleanup = await Task.Run(
+                    () => CleanupNative(shouldStop),
+                    CancellationToken.None).ConfigureAwait(false);
+                if (!cleanup.Success)
                 {
-                    try
-                    {
-                        await Task.Run(current.StopRecording, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        // Native resources are still released below and cleanup diagnostics stay with the owner.
-                    }
+                    throw new AggregateException(
+                        cleanup.Failures.Select(failure => new InvalidOperationException(failure)));
                 }
-
-                CleanupNative();
             }
             finally
             {
@@ -160,10 +182,27 @@ namespace LiveCaptionsTranslator.audio.windows
                 openedCapture.RecordingStopped += OnRecordingStopped;
                 return (openedDevice, openedCapture, inputFormat);
             }
-            catch
+            catch (Exception original)
             {
-                openedCapture?.Dispose();
-                openedDevice.Dispose();
+                var cleanup = NativeCleanupCoordinator.Run(
+                    new("Data callback detach", () =>
+                    {
+                        if (openedCapture != null)
+                            openedCapture.DataAvailable -= OnDataAvailable;
+                    }),
+                    new("Stopped callback detach", () =>
+                    {
+                        if (openedCapture != null)
+                            openedCapture.RecordingStopped -= OnRecordingStopped;
+                    }),
+                    new("WASAPI capture disposal", () => openedCapture?.Dispose()),
+                    new("MMDevice disposal", openedDevice.Dispose));
+                if (!cleanup.Success)
+                {
+                    throw new AggregateException(
+                        new[] { original }.Concat<Exception>(
+                            cleanup.Failures.Select(failure => new InvalidOperationException(failure))));
+                }
                 throw;
             }
         }
@@ -211,7 +250,7 @@ namespace LiveCaptionsTranslator.audio.windows
             {
                 InvokeSafely(RecordingStopped, new AudioRuntimeStopped(
                     AudioRuntimeStopReason.Faulted,
-                    $"WASAPI data callback failed: {ex.Message}"));
+                    $"WASAPI data callback failed: {Describe(ex)}"));
             }
         }
 
@@ -227,22 +266,27 @@ namespace LiveCaptionsTranslator.audio.windows
             }
 
             var exception = eventArgs.Exception;
+            var cleanup = CleanupNative(stopRecording: false);
             var stopped = wasExpected
-                ? new AudioRuntimeStopped(AudioRuntimeStopReason.Expected, null)
+                ? new AudioRuntimeStopped(AudioRuntimeStopReason.Expected, cleanup.FailureReason)
                 : exception != null && IsDeviceUnavailable(exception)
-                    ? new AudioRuntimeStopped(AudioRuntimeStopReason.Unavailable,
-                        $"The selected render endpoint became unavailable: {exception.Message}")
-                    : new AudioRuntimeStopped(AudioRuntimeStopReason.Faulted,
-                        exception == null
-                            ? "WASAPI loopback capture stopped unexpectedly."
-                            : $"WASAPI loopback capture failed: {exception.Message}");
+                    ? new AudioRuntimeStopped(
+                        AudioRuntimeStopReason.Unavailable,
+                        Combine(
+                            $"The selected render endpoint became unavailable: {Describe(exception)}",
+                            cleanup.FailureReason))
+                    : new AudioRuntimeStopped(
+                        AudioRuntimeStopReason.Faulted,
+                        Combine(
+                            exception == null
+                                ? "WASAPI loopback capture stopped unexpectedly."
+                                : $"WASAPI loopback capture failed: {Describe(exception)}",
+                            cleanup.FailureReason));
 
             InvokeSafely(RecordingStopped, stopped);
-            if (!wasExpected)
-                CleanupNative();
         }
 
-        private void CleanupNative()
+        private NativeCleanupResult CleanupNative(bool stopRecording)
         {
             WasapiLoopbackCapture? oldCapture;
             MMDevice? oldDevice;
@@ -255,16 +299,29 @@ namespace LiveCaptionsTranslator.audio.windows
                 started = false;
             }
 
-            if (oldCapture != null)
-            {
-                oldCapture.DataAvailable -= OnDataAvailable;
-                oldCapture.RecordingStopped -= OnRecordingStopped;
-                oldCapture.Dispose();
-            }
-            oldDevice?.Dispose();
+            return NativeCleanupCoordinator.Run(
+                new("StopRecording", () =>
+                {
+                    if (stopRecording && oldCapture != null)
+                        oldCapture.StopRecording();
+                }),
+                new("Data callback detach", () =>
+                {
+                    if (oldCapture != null)
+                        oldCapture.DataAvailable -= OnDataAvailable;
+                }),
+                new("Stopped callback detach", () =>
+                {
+                    if (oldCapture != null)
+                        oldCapture.RecordingStopped -= OnRecordingStopped;
+                }),
+                new("WASAPI capture disposal", () => oldCapture?.Dispose()),
+                new("MMDevice disposal", () => oldDevice?.Dispose()));
         }
 
         private static bool IsDeviceUnavailable(Exception exception) =>
+            exception is AggregateException aggregate &&
+                aggregate.Flatten().InnerExceptions.Any(IsDeviceUnavailable) ||
             exception is COMException comException && comException.HResult == AudclntDeviceInvalidated ||
             exception.HResult == AudclntDeviceInvalidated;
 
@@ -275,9 +332,16 @@ namespace LiveCaptionsTranslator.audio.windows
             foreach (EventHandler<T> handler in handlers.GetInvocationList())
             {
                 try { handler(this, data); }
-                catch { }
+                catch (Exception) { /* Runtime consumers are isolated from the native callback. */ }
             }
         }
+
+        private static string Combine(string original, string? cleanup) =>
+            string.IsNullOrWhiteSpace(cleanup) ? original : $"{original} {cleanup}";
+
+        private static string Describe(Exception exception) => exception is AggregateException aggregate
+            ? string.Join(" ", aggregate.Flatten().InnerExceptions.Select(Describe))
+            : exception.Message;
 
         public async ValueTask DisposeAsync()
         {

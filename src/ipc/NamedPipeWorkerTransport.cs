@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using LiveCaptionsTranslator.worker;
+using LiveCaptionsTranslator.captioning;
 
 namespace LiveCaptionsTranslator.ipc
 {
@@ -11,14 +12,19 @@ namespace LiveCaptionsTranslator.ipc
     {
         private readonly TimeSpan connectionTimeout;
         private readonly TimeSpan readyTimeout;
+        private readonly bool recognitionEnabled;
 
-        public NamedPipeWorkerTransportFactory(TimeSpan? connectionTimeout = null, TimeSpan? readyTimeout = null)
+        public NamedPipeWorkerTransportFactory(bool recognitionEnabled = false, TimeSpan? connectionTimeout = null, TimeSpan? readyTimeout = null)
         {
+            this.recognitionEnabled = recognitionEnabled;
             this.connectionTimeout = connectionTimeout ?? TimeSpan.FromSeconds(5);
-            this.readyTimeout = readyTimeout ?? TimeSpan.FromSeconds(5);
+            this.readyTimeout = readyTimeout ?? (recognitionEnabled ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(5));
         }
 
-        public IAsrWorkerTransport Create(WorkerPipeIdentity identity) => new NamedPipeWorkerTransport(identity, connectionTimeout, readyTimeout);
+        public NamedPipeWorkerTransportFactory(TimeSpan? connectionTimeout, TimeSpan? readyTimeout)
+            : this(false, connectionTimeout, readyTimeout) { }
+
+        public IAsrWorkerTransport Create(WorkerPipeIdentity identity) => new NamedPipeWorkerTransport(identity, recognitionEnabled, connectionTimeout, readyTimeout);
     }
 
     public sealed record WorkerPipeIdentity(string ControlPipeName, string AudioPipeName, Guid SessionId, byte[] Nonce)
@@ -35,6 +41,7 @@ namespace LiveCaptionsTranslator.ipc
         private readonly WorkerPipeIdentity identity;
         private readonly TimeSpan connectionTimeout;
         private readonly TimeSpan readyTimeout;
+        private readonly bool recognitionEnabled;
         private readonly NamedPipeServerStream controlServer;
         private readonly NamedPipeServerStream audioServer;
         private readonly ConcurrentDictionary<Guid, TaskCompletionSource<IpcMessage>> pending = new();
@@ -59,17 +66,22 @@ namespace LiveCaptionsTranslator.ipc
         private long streamGaps;
         private long streamInitialSequence;
 
-        public NamedPipeWorkerTransport(WorkerPipeIdentity identity, TimeSpan? connectionTimeout = null, TimeSpan? readyTimeout = null)
+        public NamedPipeWorkerTransport(WorkerPipeIdentity identity, bool recognitionEnabled = false, TimeSpan? connectionTimeout = null, TimeSpan? readyTimeout = null)
         {
             this.identity = identity;
+            this.recognitionEnabled = recognitionEnabled;
             this.connectionTimeout = connectionTimeout ?? TimeSpan.FromSeconds(5);
             this.readyTimeout = readyTimeout ?? TimeSpan.FromSeconds(5);
             controlServer = Create(identity.ControlPipeName);
             audioServer = Create(identity.AudioPipeName);
         }
 
+        public NamedPipeWorkerTransport(WorkerPipeIdentity identity, TimeSpan? connectionTimeout, TimeSpan? readyTimeout)
+            : this(identity, false, connectionTimeout, readyTimeout) { }
+
         public event EventHandler<AudioStreamSummaryPayload>? ProgressReceived;
         public event EventHandler<ErrorPayload>? ErrorReceived;
+        public event EventHandler<CaptionEvent>? CaptionEventReceived;
         public long ControlMessagesSent => Interlocked.Read(ref sent);
         public long ControlMessagesReceived => Interlocked.Read(ref received);
         public long AudioFramesSent => Interlocked.Read(ref audioFramesSent);
@@ -115,6 +127,11 @@ namespace LiveCaptionsTranslator.ipc
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new WorkerTransportException(AsrWorkerFailureKind.WorkerReadyTimeout, "WorkerReady timed out."); }
             catch (EndOfStreamException ex) { throw new WorkerTransportException(AsrWorkerFailureKind.ControlPipeClosed, ex.Message, ex); }
             Interlocked.Increment(ref received);
+            if (readyMessage.Envelope.MessageType == IpcMessageType.Error && readyMessage.Envelope.CorrelationId == Guid.Empty)
+            {
+                var error = ProtocolPayloadCodec.DecodeError(readyMessage.Payload);
+                throw new WorkerTransportException(MapWorkerError(error.Kind), $"Worker error {error.Kind}: {error.Diagnostic}");
+            }
             if (readyMessage.Envelope.MessageType != IpcMessageType.WorkerReady || readyMessage.Envelope.CorrelationId != helloMessage.Envelope.CorrelationId)
                 throw new WorkerTransportException(AsrWorkerFailureKind.ProtocolViolation, "WorkerReady type or correlation is invalid.");
             var workerReady = ProtocolPayloadCodec.DecodeWorkerReady(readyMessage.Payload);
@@ -159,9 +176,14 @@ namespace LiveCaptionsTranslator.ipc
             if (!CryptographicOperations.FixedTimeEquals(hello.Nonce, identity.Nonce)) return new(ProtocolRejectReason.AuthenticationFailed, "Authentication failed.");
             if (hello.WorkerPid != expectedPid) return new(ProtocolRejectReason.ProcessMismatch, "Worker PID mismatch.");
             if (hello.MinimumMinor > IpcProtocol.Minor || hello.MaximumMinor < hello.MinimumMinor) return new(ProtocolRejectReason.ProtocolMismatch, "No supported minor version.");
-            var required = WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink;
-            if ((hello.Capabilities & required) != required || (hello.Capabilities & (WorkerCapabilities.Vad | WorkerCapabilities.Whisper | WorkerCapabilities.Cuda | WorkerCapabilities.CaptionProduction)) != 0)
-                return new(ProtocolRejectReason.CapabilityMismatch, "Worker capabilities are invalid for Stage 4.");
+            var baseCapabilities = WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink;
+            var recognitionCapabilities = WorkerCapabilities.Vad | WorkerCapabilities.Whisper | WorkerCapabilities.CaptionProduction;
+            var required = recognitionEnabled ? baseCapabilities | recognitionCapabilities : baseCapabilities;
+            if ((hello.Capabilities & required) != required || (hello.Capabilities & WorkerCapabilities.Cuda) != 0 ||
+                (!recognitionEnabled && (hello.Capabilities & recognitionCapabilities) != 0))
+                return new(ProtocolRejectReason.CapabilityMismatch, recognitionEnabled
+                    ? "Worker capabilities do not match recognition mode."
+                    : "Worker capabilities are invalid for transport-only mode.");
             return null;
         }
 
@@ -288,8 +310,13 @@ namespace LiveCaptionsTranslator.ipc
                     {
                         var error = ProtocolPayloadCodec.DecodeError(message.Payload);
                         InvokeSafely(ErrorReceived, error);
-                        Fail(AsrWorkerFailureKind.WorkerReportedError, $"Worker error {error.Kind}: {error.Diagnostic}");
+                        Fail(MapWorkerError(error.Kind), $"Worker error {error.Kind}: {error.Diagnostic}");
                         return;
+                    }
+                    else if (message.Envelope.MessageType == IpcMessageType.CaptionEvent)
+                    {
+                        var captionEvent = ProtocolPayloadCodec.DecodeCaptionEvent(message.Payload);
+                        InvokeSafely(CaptionEventReceived, captionEvent);
                     }
                     else { Fail(AsrWorkerFailureKind.ProtocolViolation, $"Unsolicited {message.Envelope.MessageType} is not allowed."); return; }
                 }
@@ -303,6 +330,16 @@ namespace LiveCaptionsTranslator.ipc
                 foreach (var item in pending.Values) item.TrySetException(new WorkerTransportException(failure.Kind, failure.Reason, failure.Exception));
             }
         }
+
+        private static AsrWorkerFailureKind MapWorkerError(WorkerErrorKind kind) => kind switch
+        {
+            WorkerErrorKind.InvalidRecognitionConfiguration => AsrWorkerFailureKind.InvalidRecognitionConfiguration,
+            WorkerErrorKind.ModelLoadFailed => AsrWorkerFailureKind.ModelLoadFailed,
+            WorkerErrorKind.VadInferenceFailed => AsrWorkerFailureKind.VadInferenceFailed,
+            WorkerErrorKind.WhisperInferenceFailed => AsrWorkerFailureKind.WhisperInferenceFailed,
+            WorkerErrorKind.RecognitionDrainTimeout => AsrWorkerFailureKind.RecognitionDrainTimeout,
+            _ => AsrWorkerFailureKind.WorkerReportedError
+        };
 
         private WorkerTransportException Fail(AsrWorkerFailureKind kind, string reason, Exception? exception = null)
         {

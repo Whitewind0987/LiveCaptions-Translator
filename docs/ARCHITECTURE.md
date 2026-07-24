@@ -7,8 +7,10 @@ fork. Stage 2 implements and integrates the source-independent caption
 contracts and Windows Live Captions adapter. Stage 3 implements the WPF-owned
 WASAPI loopback capture, normalization, framing, and bounded-buffer foundation.
 Stage 4 implements the separately built native worker-process boundary,
-versioned named-pipe IPC, supervision, and normalized-audio transport. Speech
-recognition remains a future stage.
+versioned named-pipe IPC, supervision, and normalized-audio transport. Stage 5
+adds an explicitly configured CPU recognition build while preserving the
+model-free transport-only worker. Production caption-source integration remains
+future Stage 6 work.
 
 ## Objective
 
@@ -274,8 +276,43 @@ and sequence-scaled sample indices are validated before statistics mutate.
 Synchronous pipe readers are woken with `CancelSynchronousIo` through retained
 thread handles and every thread is joined with a bounded policy. Stage 4
 adds no VAD, Whisper, CUDA, models, recognition, caption production, or ASR
-native DLL loaded by WPF. Stage 5 and Stage 6 remain future work. Ordinary WPF
+native DLL loaded by WPF. Ordinary WPF
 startup does not start audio capture or the worker.
+
+## Stage 5 CPU recognition worker
+
+`LCT_ENABLE_RECOGNITION` composes the existing worker with a repository-owned
+recognition core plus narrow Silero ONNX and whisper.cpp adapters. The original
+`windows-x64` preset remains independent of recognition dependencies; the
+`windows-x64-recognition` preset requires explicit pinned local paths, statically
+links whisper.cpp, dynamically links the official CPU `onnxruntime.dll` beside
+the worker, and disables CUDA and host-specific CPU optimization. The WPF
+process loads neither native runtime.
+
+The audio reader converts PCM16 with `sample / 32768.0f`, accumulates sequential
+320-sample frames into exact 512-sample VAD windows, and preserves the model's
+separate 64-sample context plus `[2,1,128]` recurrent state. It never runs
+Whisper. One owned inference thread serializes all Whisper calls with one
+replaceable pending Partial and one mandatory pending Final. Requests carry
+capture session, recognition generation, segment, revision and absolute sample
+bounds; publication rechecks these identities so stale work is discarded.
+
+Central defaults are threshold 0.50, minimum speech 250 ms, endpoint silence
+500 ms, pre-roll 200 ms, post-roll 100 ms, maximum segment 20 seconds, minimum
+Partial audio 800 ms and Partial cadence 1,000 ms. A source gap invalidates
+provisional work, discards the active segment, resets VAD context/remainder and
+emits Reset without fabricating silence. Normal drain processes accepted PCM,
+flushes the incomplete VAD window, finalizes active speech, waits for mandatory
+inference and publishes captions before `AudioStreamStopped`.
+
+Each stream uses its capture Guid as caption session and emits Reset at sequence
+1. Changed non-empty Partial text advances revision. An endpoint emits
+authoritative Committed then Final with consecutive sequences and identical
+identity/text. Empty final output emits nothing without a Partial, or Reset when
+provisional text must be invalidated. Audio ranges derive from absolute samples.
+Stage 5 exposes these events from transport and pipeline only; it does not
+implement `ICaptionSource`, touch `Translator`, or change WPF startup. Stage 6
+has not begun.
 
 ## Caption event lifecycle
 

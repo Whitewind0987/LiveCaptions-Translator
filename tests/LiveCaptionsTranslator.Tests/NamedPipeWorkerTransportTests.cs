@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using LiveCaptionsTranslator.ipc;
 using LiveCaptionsTranslator.worker;
+using LiveCaptionsTranslator.captioning;
 using Xunit;
 
 namespace LiveCaptionsTranslator.Tests;
@@ -142,6 +143,37 @@ public sealed class NamedPipeWorkerTransportTests
     }
 
     [Fact]
+    public async Task UnsolicitedCaptionEventIsDecodedAndSubscriberFailuresAreIsolated()
+    {
+        var identity = WorkerPipeIdentity.Create(); var capture = Guid.NewGuid();
+        await using var host = new NamedPipeWorkerTransport(identity, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        CaptionEvent? received = null;
+        host.CaptionEventReceived += (_, _) => throw new InvalidOperationException("subscriber");
+        host.CaptionEventReceived += (_, value) => received = value;
+        var worker = RunCaptionMessageAsync(identity, ProtocolPayloadCodec.EncodeCaptionEvent(
+            new CaptionEvent(1, capture, 1, 0, 0, CaptionEventKind.Reset, "", null, null, DateTimeOffset.UtcNow)));
+        await host.ConnectAndHandshakeAsync(Environment.ProcessId, Token);
+        await worker;
+        Assert.NotNull(received); Assert.Equal(capture, received.SessionId);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task CorrelatedOrMalformedCaptionEventIsProtocolViolation(bool correlated, bool malformed)
+    {
+        var identity = WorkerPipeIdentity.Create();
+        await using var host = new NamedPipeWorkerTransport(identity, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        var payload = malformed ? new byte[] { 1, 2, 3 } : ProtocolPayloadCodec.EncodeCaptionEvent(
+            new CaptionEvent(1, Guid.NewGuid(), 1, 0, 0, CaptionEventKind.Reset, "", null, null, DateTimeOffset.UtcNow));
+        var worker = RunCaptionMessageAsync(identity, payload, correlated);
+        await host.ConnectAndHandshakeAsync(Environment.ProcessId, Token);
+        var failure = await host.TerminalFailure.WaitAsync(TimeSpan.FromSeconds(1), Token);
+        await worker;
+        Assert.Equal(AsrWorkerFailureKind.ProtocolViolation, failure.Kind);
+    }
+
+    [Fact]
     public async Task SecondClientCannotJoinEitherOwnedSessionPipe()
     {
         var identity = WorkerPipeIdentity.Create();
@@ -245,5 +277,21 @@ public sealed class NamedPipeWorkerTransportTests
         await Task.Delay(20, Token);
         await control.WriteAsync(IpcMessageType.Error, ProtocolPayloadCodec.Encode(new ErrorPayload(WorkerErrorKind.InternalFailure, "worker failure")), cancellationToken: Token);
         await Task.Delay(20, Token);
+    }
+
+    private static async Task RunCaptionMessageAsync(WorkerPipeIdentity identity, byte[] payload, bool correlated = false)
+    {
+        await using var controlPipe = new NamedPipeClientStream(".", identity.ControlPipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        await using var audioPipe = new NamedPipeClientStream(".", identity.AudioPipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        await Task.WhenAll(controlPipe.ConnectAsync(2000, Token), audioPipe.ConnectAsync(2000, Token));
+        await using var control = new IpcMessageStream(controlPipe); await using var audio = new IpcMessageStream(audioPipe, IpcProtocol.AudioFramePayloadSize);
+        var handshake = Guid.NewGuid();
+        await control.WriteAsync(IpcMessageType.WorkerHello, ProtocolPayloadCodec.Encode(new WorkerHelloPayload(identity.SessionId, identity.Nonce, Environment.ProcessId, 0, 0, "test", WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink)), handshake, cancellationToken: Token);
+        await audio.WriteAsync(IpcMessageType.AudioPipeHello, ProtocolPayloadCodec.Encode(new AudioPipeHelloPayload(identity.SessionId, identity.Nonce, Environment.ProcessId)), handshake, cancellationToken: Token);
+        await audio.ReadAsync(Token); await control.ReadAsync(Token);
+        await control.WriteAsync(IpcMessageType.WorkerReady, ProtocolPayloadCodec.Encode(new WorkerReadyPayload(identity.SessionId, Environment.ProcessId)), handshake, cancellationToken: Token);
+        await Task.Delay(20, Token);
+        await control.WriteAsync(IpcMessageType.CaptionEvent, payload, correlated ? Guid.NewGuid() : Guid.Empty, cancellationToken: Token);
+        await Task.Delay(30, Token);
     }
 }

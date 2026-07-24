@@ -32,6 +32,14 @@ namespace LiveCaptionsTranslator.worker
             info.ArgumentList.Add("--audio-pipe"); info.ArgumentList.Add(request.AudioPipeName);
             info.ArgumentList.Add("--session"); info.ArgumentList.Add(request.SessionId.ToString("D"));
             info.ArgumentList.Add("--parent-pid"); info.ArgumentList.Add(request.ParentPid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var recognition = request.Recognition ?? WorkerRecognitionConfiguration.Disabled;
+            if (recognition.Enabled)
+            {
+                info.ArgumentList.Add("--vad-model"); info.ArgumentList.Add(recognition.VadModelPath!);
+                info.ArgumentList.Add("--whisper-model"); info.ArgumentList.Add(recognition.WhisperModelPath!);
+                info.ArgumentList.Add("--language"); info.ArgumentList.Add(recognition.Language);
+                info.ArgumentList.Add("--threads"); info.ArgumentList.Add(recognition.ThreadCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
             info.Environment[IpcProtocol.NonceEnvironmentVariable] = Convert.ToHexString(request.AuthenticationNonce);
             var process = new Process { StartInfo = info, EnableRaisingEvents = true };
             try

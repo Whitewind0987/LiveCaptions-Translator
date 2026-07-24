@@ -31,7 +31,12 @@ namespace LiveCaptionsTranslator.ipc
         InvalidStreamState,
         InvalidAudioFrame,
         ParentExited,
-        InternalFailure
+        InternalFailure,
+        InvalidRecognitionConfiguration,
+        ModelLoadFailed,
+        VadInferenceFailed,
+        WhisperInferenceFailed,
+        RecognitionDrainTimeout
     }
 
     public sealed record WorkerHelloPayload(Guid SessionId, byte[] Nonce, int WorkerPid, ushort MinimumMinor, ushort MaximumMinor, string BuildVersion, WorkerCapabilities Capabilities);

@@ -682,7 +682,92 @@ streaming, summary, failure, restart, Ctrl+C, and orphan-process checks are
 
 ## Stage 4 limitations
 
-Stage 4 has no VAD, Whisper, CUDA, models, recognition, generated captions,
-production `ICaptionSource`, Translator integration, translation changes, or
-packaging integration. Stage 5 has not begun.
+Stage 4 transport-only behavior remains available without VAD, Whisper or
+models. Stage 5 recognition is opt-in and does not add production WPF source or
+packaging integration.
+
+## Stage 5 automated and real-model validation
+
+Stage 5 managed validation last completed on Windows 10 with **311 passed, 0
+failed, 0 skipped**, preserving all 293 previous tests. Coverage added for
+typed recognition configuration and option rejection, transport-only defaults,
+strict WAV parsing/padding, expected-token normalization, recognition
+capabilities/error mapping, unsolicited CaptionEvent decoding/correlation,
+malformed payload failure, subscriber isolation, active-session forwarding, no
+post-stop delivery and reentrant stop suppression.
+
+Both `windows-x64-release` and `windows-x64-recognition-release` configured and
+built successfully before the final diagnostics-output-only edit. Each CTest
+preset passed 2/2 test executables: protocol/golden-vector and fake-engine
+recognition tests. Repository-owned targets passed `/W4 /WX`. The recognition
+build emitted only upstream whisper.cpp compiler warnings; these are not new
+main-project warnings. A final recognition rebuild/CTest was attempted after
+the diagnostics edit, but the execution environment rejected elevated
+execution because its command-usage allowance was exhausted; it remains
+pending.
+
+### Real pinned-model silence fixture — passed
+
+`--wav silence-16k-mono.wav --recognition` used the pinned Silero opset-15
+model, multilingual `ggml-tiny.bin`, language `en`, and 4 threads.
+
+- Caption events: Reset sequence 1 only; no text event
+- Summary: 50 frames, 32,000 PCM bytes, 0 padding, 0 gaps, 0 invalid
+- Capabilities: ProtocolV1, NormalizedPcmSink, Vad, Whisper and
+  CaptionProduction; CUDA absent
+- Heartbeat failures 0; final state Stopped; graceful shutdown true; forced
+  termination false; exit code 0; no remaining owned PID
+
+### Real pinned-model SAPI speech fixture — passed
+
+Windows SAPI generated an ignored 16 kHz mono PCM16 fixture containing `This is
+a local speech recognition test. The worker should produce structured caption
+events.` The probe required `local speech recognition` and `structured caption
+events`.
+
+- 399 protocol frames and 255,360 transmitted bytes
+- One final short frame padded by 160 bytes
+- 0 source gaps and 0 invalid worker frames
+- Gate-accepted lifecycle: Reset 1; Partial 2; Committed 3; Final 4; Partial 5;
+  Committed 6; Final 7
+- Segment 1 revision 2, audio 0–3520 ms: `This is a local speech recognition
+  test.`
+- Segment 2 revision 2, audio 3672–7776 ms: `The worker shoot produced
+  structured caption events.`
+- Both expected phrases matched a Final after Unicode/case/punctuation/space
+  normalization
+- Heartbeat failures 0; graceful exit code 0; no forced termination, cleanup
+  failure or remaining worker PID
+
+The actual model-dependent transcript is recorded verbatim.
+
+### Stage 5 checks still pending
+
+- Final recognition native rebuild and CTest after the diagnostics-output edit
+- Windows 10 real default-endpoint `--audio --recognition` while the known
+  speech fixture is audibly played
+- Windows 10 interactive Ctrl+C with recognition active, including exact
+  capture/drop/gap accounting and all owner joins
+- Final rerun of the complete Stage 4 synthetic and real-audio probe matrix
+- Every Windows 11 Stage 5 build/runtime/manual check
+
+Stage 5 must not be marked complete until the pending Windows 10 real-WASAPI
+and Ctrl+C checks pass. Stage 6 has not begun.
+
+The latest Stage 4 synthetic rerun completed with exit code 0 for baseline
+(250/250), explicit restart (150/150 across two sessions), controlled exit,
+requested cancellation, and slow-worker (50/50). A transport-only real-audio
+cleanup rerun produced no frames because no source was audible: controlled exit
+and requested cancellation passed, while strict normal-stop and restart checks
+correctly returned 1 because they require real audio. All four left no owned
+PID and reported no forced termination or cleanup failure; the zero-frame runs
+do not replace the previously accepted real-audio results.
+
+The final `dotnet restore` attempt was blocked by NuGet TLS credential failure
+(`NU1301`). An offline retry could not reconstruct packages absent from the
+offline source, and the required sandbox-external retry was rejected because
+the execution environment's elevated-command allowance was exhausted. The last
+successful 311-test run therefore predates the final caption-dispatcher and
+native cancellation/post-roll edits; restore, build, all tests and warnings
+must be rerun before review acceptance.
 

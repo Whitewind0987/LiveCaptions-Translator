@@ -2,7 +2,7 @@
 
 ## Repository state
 
-- Branch: `feature/asr-worker-ipc`
+- Branch: `feature/vad-whisper-worker`
 - Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
 - Stage 4 starting commit: `04e4f2c95ac98a8c32dbb7ae34b1a679a52835ad`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
@@ -15,11 +15,16 @@
     Windows 10 core real-audio acceptance
   - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
     foundation implementation and automated cross-process validation
-- Current status: Stage 4 implementation, automated validation, and Windows 10
-  default-device real-audio normal-stop, controlled-exit, explicit-restart, and
-  interactive-cancellation acceptance are complete. All Windows 11 Stage 4
-  runtime checks remain pending
-- Next stage: Stage 5 has not begun and must not begin without explicit approval
+- Current status: Stage 5 CPU recognition implementation is present on the
+  working branch. Deterministic managed/native tests, the real-model silence
+  fixture, and the real-model known-speech cross-process fixture passed on
+  Windows 10. Final acceptance is pending full rebuild/test after the last
+  dispatcher, cancellation, diagnostics and post-roll edits plus real-WASAPI
+  and recognition Ctrl+C runs. NuGet TLS failure and the execution environment's
+  exhausted elevated-command allowance blocked that rerun. Stage 5 is therefore
+  not marked complete.
+- Next stage: finish the remaining Stage 5 acceptance only. Stage 6 has not
+  begun and requires explicit approval after Stage 5 acceptance.
 
 ## Environment
 
@@ -310,5 +315,44 @@ PID remained. This is bounded-drop accounting and clean-interruption evidence,
 not zero-loss evidence; the separate 500/500 normal-stop run remains the strict
 zero-drop acceptance. All Windows 11 Stage 4 runtime checks remain pending.
 Ordinary WPF startup is unchanged and does not construct capture or worker
-infrastructure. Stage 5 has not begun.
+infrastructure.
+
+## Stage 5 CPU recognition implementation and acceptance status
+
+Stage 5 adds an opt-in CPU recognition build of the same native worker. The
+existing transport-only preset remains model-free. The recognition preset pins
+whisper.cpp v1.8.6 (`23ee035`), Silero VAD v6.2.1 (`7e30209`) and ONNX Runtime
+CPU 1.23.0, loads both explicitly supplied absolute model paths before
+`WorkerReady`, and advertises VAD, Whisper and caption-production capabilities
+without CUDA. Models, dependency trees, runtime DLLs, fixtures and build output
+remain ignored local files.
+
+The worker owns stateful 512-sample Silero windows over existing 320-sample
+frames, bounded speech segments, one serialized Whisper inference thread,
+latest-wins Partial work, mandatory Final work, generation-based stale-result
+rejection, gap Reset behavior, and Reset/Partial/Committed/Final wire events.
+Transport and pipeline expose guarded notifications for future Stage 6 without
+routing anything into the application. Ordinary WPF startup remains unchanged.
+
+The managed suite passed **311/311** (0 failed, 0 skipped), preserving all 293
+previous tests. Both transport-only and recognition CTest presets passed both
+native test executables. A real two-second silence fixture produced only Reset,
+50/50 frames, no gaps/invalid frames, graceful exit 0 and no forced cleanup. A
+real SAPI fixture generated at 16 kHz mono PCM16 from “This is a local speech
+recognition test. The worker should produce structured caption events.” produced
+399 frames (160 bytes of one final padded frame), no gaps or invalid frames,
+and the accepted sequence Reset; Partial; Committed; Final; Partial; Committed;
+Final. Actual Final text was `This is a local speech recognition test.` and
+`The worker shoot produced structured caption events.` Both required phrases
+matched after exact normalization, heartbeat failures were zero, shutdown was
+graceful, exit code was 0, forced termination was false, and no worker PID
+remained.
+
+Windows 10 real-WASAPI recognition and recognition Ctrl+C cleanup have not yet
+been run. Full managed and native validation after the final source edits is
+also pending: NuGet restore failed with `NU1301`, and sandbox-external NuGet and
+CMake retries were rejected after the execution environment exhausted its
+elevated-command allowance. The last successful 311-test/native runs therefore
+predate those final edits. All Windows 11 Stage 5 checks remain pending. Stage 6
+has not begun.
 

@@ -13,6 +13,7 @@ namespace LiveCaptionsTranslator.worker
         private readonly TimeSpan heartbeatInterval;
         private readonly TimeSpan heartbeatTimeout;
         private readonly TimeSpan gracefulShutdownTimeout;
+        private readonly WorkerRecognitionConfiguration recognition;
         private readonly SemaphoreSlim lifecycle = new(1, 1);
         private readonly object stateLock = new();
         private AsrWorkerState state = AsrWorkerState.Stopped;
@@ -67,12 +68,13 @@ namespace LiveCaptionsTranslator.worker
         private sealed record StatusPublication(AsrWorkerStatus Status, long Generation, long StateVersion);
         private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public AsrWorkerSupervisor(string executablePath, IWorkerProcessLauncher? launcher = null, IWorkerJobFactory? jobFactory = null, IAsrWorkerTransportFactory? transportFactory = null, TimeSpan? heartbeatInterval = null, TimeSpan? heartbeatTimeout = null, TimeSpan? gracefulShutdownTimeout = null)
+        public AsrWorkerSupervisor(string executablePath, IWorkerProcessLauncher? launcher = null, IWorkerJobFactory? jobFactory = null, IAsrWorkerTransportFactory? transportFactory = null, TimeSpan? heartbeatInterval = null, TimeSpan? heartbeatTimeout = null, TimeSpan? gracefulShutdownTimeout = null, WorkerRecognitionConfiguration? recognition = null)
         {
             this.executablePath = Path.GetFullPath(executablePath ?? throw new ArgumentNullException(nameof(executablePath)));
             this.launcher = launcher ?? new WorkerProcessLauncher();
             this.jobFactory = jobFactory ?? new WindowsWorkerJobFactory();
-            this.transportFactory = transportFactory ?? new NamedPipeWorkerTransportFactory();
+            this.recognition = recognition ?? WorkerRecognitionConfiguration.Disabled;
+            this.transportFactory = transportFactory ?? new NamedPipeWorkerTransportFactory(this.recognition.Enabled);
             this.heartbeatInterval = heartbeatInterval ?? TimeSpan.FromSeconds(2);
             this.heartbeatTimeout = heartbeatTimeout ?? TimeSpan.FromSeconds(6);
             this.gracefulShutdownTimeout = gracefulShutdownTimeout ?? TimeSpan.FromSeconds(5);
@@ -149,7 +151,7 @@ namespace LiveCaptionsTranslator.worker
                     sessionCancellation = new CancellationTokenSource();
                     try
                     {
-                        process = await launcher.LaunchAsync(new WorkerLaunchRequest(executablePath, identity.ControlPipeName, identity.AudioPipeName, identity.SessionId, Environment.ProcessId, identity.Nonce), cancellationToken).ConfigureAwait(false);
+                        process = await launcher.LaunchAsync(new WorkerLaunchRequest(executablePath, identity.ControlPipeName, identity.AudioPipeName, identity.SessionId, Environment.ProcessId, identity.Nonce, recognition), cancellationToken).ConfigureAwait(false);
                         await job.AssignAsync(process, cancellationToken).ConfigureAwait(false);
                         if (!job.AssignmentSucceeded && job.FailureReason != null) cleanupFailures.Add(job.FailureReason);
                         SetStateLocked(AsrWorkerState.Connecting);

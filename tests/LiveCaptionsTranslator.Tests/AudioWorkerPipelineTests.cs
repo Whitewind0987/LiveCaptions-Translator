@@ -1,6 +1,7 @@
 using LiveCaptionsTranslator.audio;
 using LiveCaptionsTranslator.ipc;
 using LiveCaptionsTranslator.worker;
+using LiveCaptionsTranslator.captioning;
 using Xunit;
 
 namespace LiveCaptionsTranslator.Tests;
@@ -200,6 +201,40 @@ public sealed class AudioWorkerPipelineTests
         Assert.True(worker.Processes[0].HasExited);
     }
 
+    [Fact]
+    public async Task CaptionForwardingAcceptsOnlyActiveSessionAndStopsAfterCleanup()
+    {
+        var captureFactory = new FakeAudioCaptureRuntimeFactory();
+        var capture = new AudioCaptureService(new FakeAudioEndpointProvider(), captureFactory);
+        var worker = new PipelineWorkerFixture();
+        await using var pipeline = new AudioWorkerPipeline(capture, worker.Supervisor);
+        var received = new List<CaptionEvent>(); pipeline.CaptionEventReceived += (_, value) => received.Add(value);
+        await pipeline.StartAsync(null, Token);
+        worker.Transports[0].EmitReset(Guid.NewGuid());
+        worker.Transports[0].EmitReset();
+        await WaitAsync(() => received.Count == 1);
+        await pipeline.StopAsync(Token);
+        worker.Transports[0].EmitReset();
+        await Task.Delay(20, Token);
+        Assert.Single(received);
+    }
+
+    [Fact]
+    public async Task ReentrantStopFromFirstCaptionSubscriberPreventsLaterDelivery()
+    {
+        var captureFactory = new FakeAudioCaptureRuntimeFactory();
+        var capture = new AudioCaptureService(new FakeAudioEndpointProvider(), captureFactory);
+        var worker = new PipelineWorkerFixture();
+        await using var pipeline = new AudioWorkerPipeline(capture, worker.Supervisor);
+        var second = 0;
+        pipeline.CaptionEventReceived += (_, _) => pipeline.StopAsync(Token).GetAwaiter().GetResult();
+        pipeline.CaptionEventReceived += (_, _) => second++;
+        await pipeline.StartAsync(null, Token);
+        worker.Transports[0].EmitReset();
+        await WaitAsync(() => pipeline.State == AudioWorkerPipelineState.Stopped);
+        Assert.Equal(0, second);
+    }
+
     private static async Task WaitAsync(Func<bool> condition)
     {
         for (var attempt = 0; attempt < 100 && !condition(); attempt++)
@@ -253,6 +288,9 @@ public sealed class AudioWorkerPipelineTests
         private readonly TaskCompletionSource pendingSend = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private Guid captureSession; public List<string> Events { get; } = []; public List<NormalizedAudioFrame> Frames { get; } = [];
         public event EventHandler<AudioStreamSummaryPayload>? ProgressReceived { add { } remove { } } public event EventHandler<ErrorPayload>? ErrorReceived { add { } remove { } }
+        public event EventHandler<CaptionEvent>? CaptionEventReceived;
+        public void EmitReset(Guid? session = null) => CaptionEventReceived?.Invoke(this,
+            new CaptionEvent(1, session ?? captureSession, 1, 0, 0, CaptionEventKind.Reset, "", null, null, DateTimeOffset.UtcNow));
         public long ControlMessagesSent => 0; public long ControlMessagesReceived => 0; public long AudioFramesSent => Frames.Count; public long AudioBytesSent => Frames.Sum(frame => frame.Payload.Length); public DateTimeOffset? LatestPongAtUtc => DateTimeOffset.UtcNow;
         public Task<WorkerTransportFailure> TerminalFailure { get; } = new TaskCompletionSource<WorkerTransportFailure>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
         public Task<WorkerTransportStartResult> ConnectAndHandshakeAsync(int expectedPid, CancellationToken cancellationToken = default) { Events.Add("connect"); return Task.FromResult(new WorkerTransportStartResult(0, WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink, TimeSpan.Zero)); }

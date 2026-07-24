@@ -1,4 +1,8 @@
 #include "protocol.hpp"
+#ifdef LCT_ENABLE_RECOGNITION
+#include "recognition.hpp"
+#include "recognition_adapters.hpp"
+#endif
 #include <windows.h>
 #include <atomic>
 #include <chrono>
@@ -6,6 +10,10 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <filesystem>
+#include <set>
+#include <algorithm>
+#include <cstring>
 
 namespace {
 using namespace lct;
@@ -22,19 +30,53 @@ public:
     bool valid() const { return value_ != INVALID_HANDLE_VALUE && value_ != nullptr; }
 };
 
-struct args { std::wstring control, audio, session; DWORD parent{}; };
+struct args {
+    std::wstring control, audio, session, vad_model, whisper_model;
+    std::string language{"auto"};
+    DWORD parent{};
+    int threads{};
+    bool recognition() const { return !vad_model.empty() || !whisper_model.empty(); }
+};
+
+std::string narrow_ascii(std::wstring_view value) {
+    std::string result;
+    for (const auto character : value) {
+        if (character > 127) throw protocol_error("language must be an ASCII language code");
+        result.push_back(static_cast<char>(character));
+    }
+    return result;
+}
 
 args parse(int argc, wchar_t** argv) {
     args result;
-    for (int index = 1; index + 1 < argc; index += 2) {
+    std::set<std::wstring> seen;
+    if ((argc - 1) % 2 != 0) throw protocol_error("worker argument has no value");
+    for (int index = 1; index < argc; index += 2) {
         std::wstring key = argv[index], value = argv[index + 1];
+        if (!seen.insert(key).second) throw protocol_error("duplicate worker argument");
         if (key == L"--control-pipe") result.control = value;
         else if (key == L"--audio-pipe") result.audio = value;
         else if (key == L"--session") result.session = value;
-        else if (key == L"--parent-pid") result.parent = std::stoul(value);
+        else if (key == L"--parent-pid") { try { result.parent = std::stoul(value); } catch (...) { throw protocol_error("invalid parent PID"); } }
+        else if (key == L"--vad-model") result.vad_model = value;
+        else if (key == L"--whisper-model") result.whisper_model = value;
+        else if (key == L"--language") result.language = narrow_ascii(value);
+        else if (key == L"--threads") { try { result.threads = std::stoi(value); } catch (...) { throw protocol_error("invalid recognition thread count"); } }
         else throw protocol_error("unknown argument");
     }
     if (result.control.empty() || result.audio.empty() || result.session.empty() || !result.parent) throw protocol_error("missing argument");
+    if (result.recognition()) {
+        if (result.vad_model.empty() || result.whisper_model.empty()) throw protocol_error("both recognition model paths are required");
+        if (!std::filesystem::path(result.vad_model).is_absolute() || !std::filesystem::is_regular_file(result.vad_model) ||
+            !std::filesystem::path(result.whisper_model).is_absolute() || !std::filesystem::is_regular_file(result.whisper_model))
+            throw protocol_error("recognition model paths must be absolute existing files");
+        if (result.threads < 1 || result.threads > 32) throw protocol_error("recognition thread count must be between 1 and 32");
+        if (result.language.empty() || result.language.size() > 12 || !std::all_of(result.language.begin(), result.language.end(), [](char value) { return (value >= 'a' && value <= 'z') || value == '-'; }))
+            throw protocol_error("invalid recognition language");
+#ifndef LCT_ENABLE_RECOGNITION
+        throw protocol_error("this worker was built without recognition support");
+#endif
+    } else if (seen.contains(L"--language") || seen.contains(L"--threads")) throw protocol_error("recognition options require both model paths");
     return result;
 }
 
@@ -113,6 +155,10 @@ std::vector<std::uint8_t> identity_payload(const guid& worker, const guid& captu
     return payload;
 }
 
+std::vector<std::uint8_t> error_payload(std::uint16_t kind, std::string_view diagnostic) {
+    std::vector<std::uint8_t> error; put_u16(error, kind); put_string(error, diagnostic); return error;
+}
+
 void cancel_thread(HANDLE thread) {
     if (thread != nullptr && thread != INVALID_HANDLE_VALUE) CancelSynchronousIo(thread);
 }
@@ -174,7 +220,8 @@ int wmain(int argc, wchar_t** argv) {
         guid audio_correlation{};
         audio_correlation.bytes[15] = 2;
         const auto pid = static_cast<std::int32_t>(GetCurrentProcessId());
-        const auto control_hello = encode_worker_hello(session, nonce, pid, "stage4-1.0.0", 3);
+        const auto capabilities = arguments.recognition() ? 47ULL : 3ULL;
+        const auto control_hello = encode_worker_hello(session, nonce, pid, "stage5-1.0.0", capabilities);
         const auto audio_hello = encode_audio_pipe_hello(session, nonce, pid);
         control_writer.send(message_type::worker_hello, control_hello, control_correlation);
         audio_writer.send(message_type::audio_pipe_hello, audio_hello, audio_correlation);
@@ -188,6 +235,21 @@ int wmain(int argc, wchar_t** argv) {
         if (accept.env.type != static_cast<std::uint16_t>(message_type::host_accept) || accept.env.correlation != control_correlation) throw protocol_error("expected correlated host accept");
         std::size_t accept_offset = 0;
         if (get_guid(accept.payload, accept_offset) != session || get_u16(accept.payload, accept_offset) != 0 || get_i32(accept.payload, accept_offset) != 16000 || get_u16(accept.payload, accept_offset) != 1 || get_u16(accept.payload, accept_offset) != 16 || get_u16(accept.payload, accept_offset) != 20 || get_u32(accept.payload, accept_offset) != 320 || get_u32(accept.payload, accept_offset) != 640 || accept_offset != accept.payload.size()) throw protocol_error("invalid host accept");
+        #ifdef LCT_ENABLE_RECOGNITION
+        std::unique_ptr<StreamingRecognizer> recognizer;
+        if (arguments.recognition()) {
+            try {
+                auto vad = create_silero_vad(arguments.vad_model);
+                auto whisper = create_whisper_engine(arguments.whisper_model, arguments.language, arguments.threads);
+                recognizer = std::make_unique<StreamingRecognizer>(std::move(vad), std::move(whisper),
+                    [&](std::span<const std::uint8_t> payload) { control_writer.send(message_type::caption_event, payload); });
+            }
+            catch (const std::exception& exception) {
+                control_writer.send(message_type::error, error_payload(static_cast<std::uint16_t>(recognition_error_kind::model_load_failed), exception.what()));
+                stopping = true; join_bounded(parent_monitor); return 23;
+            }
+        }
+        #endif
         control_writer.send(message_type::worker_ready, ready(session), control_correlation);
 
         std::thread audio_reader([&] {
@@ -198,10 +260,21 @@ int wmain(int argc, wchar_t** argv) {
                     if (!empty_guid(incoming.env.correlation)) throw protocol_error("audio message correlation is not empty");
                     if (incoming.env.type == static_cast<std::uint16_t>(message_type::audio_frame)) {
                         const auto metadata = decode_audio_metadata(incoming.payload);
-                        std::lock_guard lock(statistics_mutex);
-                        audio_lifecycle.frame();
-                        if (!validate_audio(statistics, metadata)) { statistics.invalid++; continue; }
-                        if (statistics.frames % 50 == 0) control_writer.send(message_type::audio_progress, encode_summary(statistics));
+                        bool gap = false;
+                        { std::lock_guard lock(statistics_mutex);
+                            audio_lifecycle.frame();
+                            const auto previous_gaps = statistics.gaps;
+                            if (!validate_audio(statistics, metadata)) { statistics.invalid++; continue; }
+                            gap = statistics.gaps != previous_gaps;
+                            if (statistics.frames % 50 == 0) control_writer.send(message_type::audio_progress, encode_summary(statistics));
+                        }
+                        #ifdef LCT_ENABLE_RECOGNITION
+                        if (recognizer) {
+                            std::array<std::int16_t, 320> pcm{};
+                            std::memcpy(pcm.data(), incoming.payload.data() + 60, pcm_bytes);
+                            recognizer->accept_frame(pcm, metadata.sample_index, gap);
+                        }
+                        #endif
                         if (test_audio_delay_ms != 0) Sleep(test_audio_delay_ms);
                     }
                     else if (incoming.env.type == static_cast<std::uint16_t>(message_type::audio_stream_end)) {
@@ -210,8 +283,11 @@ int wmain(int argc, wchar_t** argv) {
                             audio_lifecycle.frame();
                             if (!validate_audio_stream_end(statistics, end)) throw protocol_error("audio stream end totals or identity do not match");
                             audio_lifecycle.end();
-                            audio_end_received = true;
                         }
+                        #ifdef LCT_ENABLE_RECOGNITION
+                        if (recognizer) recognizer->end_stream();
+                        #endif
+                        { std::lock_guard lock(statistics_mutex); audio_end_received = true; }
                         audio_end_changed.notify_all();
                     }
                     else throw protocol_error("invalid audio message");
@@ -219,10 +295,11 @@ int wmain(int argc, wchar_t** argv) {
             }
             catch (const std::exception& exception) {
                 if (!stopping) {
-                    std::vector<std::uint8_t> error;
-                    put_u16(error, 0);
-                    put_string(error, exception.what());
-                    try { control_writer.send(message_type::error, error); } catch (const std::exception&) { }
+                    auto kind = static_cast<std::uint16_t>(0);
+                    #ifdef LCT_ENABLE_RECOGNITION
+                    if (const auto* recognition_error = dynamic_cast<const recognition_exception*>(&exception)) kind = static_cast<std::uint16_t>(recognition_error->kind);
+                    #endif
+                    try { control_writer.send(message_type::error, error_payload(kind, exception.what())); } catch (const std::exception&) { }
                     stopping = true;
                     cancel_thread(control_thread.get());
                 }
@@ -251,6 +328,9 @@ int wmain(int argc, wchar_t** argv) {
                     const auto started_at = get_i64(incoming.payload, offset);
                     if (get_i32(incoming.payload, offset) != 16000 || get_u16(incoming.payload, offset) != 1 || get_u16(incoming.payload, offset) != 16 || get_u16(incoming.payload, offset) != 20 || get_u32(incoming.payload, offset) != 320 || get_u32(incoming.payload, offset) != 640 || fresh.initial_sequence < 1 || started_at <= 0 || offset != incoming.payload.size()) throw protocol_error("invalid audio format");
                     { std::lock_guard lock(statistics_mutex); audio_lifecycle.start(); statistics = fresh; audio_end_received = false; }
+                    #ifdef LCT_ENABLE_RECOGNITION
+                    if (recognizer) recognizer->start_stream(fresh.capture_session);
+                    #endif
                     control_writer.send(message_type::audio_started, identity_payload(session, fresh.capture_session), incoming.env.correlation);
                 }
                 else if (type == message_type::stop_audio) {
@@ -261,7 +341,8 @@ int wmain(int argc, wchar_t** argv) {
                     std::vector<std::uint8_t> summary;
                     { std::unique_lock lock(statistics_mutex);
                         if (capture != statistics.capture_session) throw protocol_error("capture session mismatch");
-                        if (!audio_end_changed.wait_for(lock, std::chrono::seconds(2), [&]{ return audio_end_received || stopping.load(); }) || !audio_end_received) throw protocol_error("timed out waiting for audio stream end");
+                        const auto timeout = arguments.recognition() ? std::chrono::seconds(125) : std::chrono::seconds(2);
+                        if (!audio_end_changed.wait_for(lock, timeout, [&]{ return audio_end_received || stopping.load(); }) || !audio_end_received) throw protocol_error("timed out waiting for audio stream end");
                         audio_lifecycle.stop();
                         summary = encode_summary(statistics);
                     }
@@ -294,6 +375,26 @@ int wmain(int argc, wchar_t** argv) {
         cancel_thread(audio_reader.native_handle());
         join_bounded(audio_reader);
         join_bounded(parent_monitor);
+        #ifdef LCT_ENABLE_RECOGNITION
+        if (recognizer) {
+            const auto diagnostics = recognizer->diagnostics();
+            recognizer.reset();
+            std::cout << "recognition enabled=1 vad_windows=" << diagnostics.vad_windows
+                      << " regions_started=" << diagnostics.speech_regions_started
+                      << " regions_completed=" << diagnostics.speech_regions_completed
+                      << " regions_discarded=" << diagnostics.speech_regions_discarded
+                      << " partial_submitted=" << diagnostics.partial_submitted
+                      << " partial_replaced=" << diagnostics.partial_replaced
+                      << " partial_completed=" << diagnostics.partial_completed
+                      << " partial_stale=" << diagnostics.partial_stale
+                      << " final_completed=" << diagnostics.final_completed
+                      << " caption_sequence=" << diagnostics.last_caption_sequence
+                      << " inference_count=" << diagnostics.inference_count
+                      << " latest_inference_ms=" << diagnostics.latest_inference_ms
+                      << " maximum_inference_ms=" << diagnostics.maximum_inference_ms
+                      << " inference_thread_joined=1\n";
+        }
+        #endif
         std::cout << "LiveCaptionsAsrWorker clean shutdown\n";
         return 0;
     }

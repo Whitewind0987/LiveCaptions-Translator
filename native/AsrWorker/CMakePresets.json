@@ -16,13 +16,26 @@
       "architecture": "ARM64",
       "binaryDir": "${sourceDir}/build/arm64",
       "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }
+    },
+    {
+      "name": "windows-x64-recognition",
+      "displayName": "Windows x64 CPU recognition",
+      "inherits": "windows-x64",
+      "binaryDir": "${sourceDir}/build/windows-x64-recognition",
+      "cacheVariables": {
+        "LCT_ENABLE_RECOGNITION": "ON",
+        "LCT_WHISPER_SOURCE_DIR": "${sourceDir}/../../.deps/stage5/whisper.cpp",
+        "LCT_ONNXRUNTIME_DIR": "${sourceDir}/../../.deps/stage5/onnxruntime-win-x64-1.23.0"
+      }
     }
   ],
   "buildPresets": [
     { "name": "windows-x64-release", "configurePreset": "windows-x64", "configuration": "Release" },
-    { "name": "windows-arm64-release", "configurePreset": "windows-arm64", "configuration": "Release" }
+    { "name": "windows-arm64-release", "configurePreset": "windows-arm64", "configuration": "Release" },
+    { "name": "windows-x64-recognition-release", "configurePreset": "windows-x64-recognition", "configuration": "Release" }
   ],
   "testPresets": [
-    { "name": "windows-x64-release", "configurePreset": "windows-x64", "configuration": "Release", "output": { "outputOnFailure": true } }
+    { "name": "windows-x64-release", "configurePreset": "windows-x64", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "windows-x64-recognition-release", "configurePreset": "windows-x64-recognition", "configuration": "Release", "output": { "outputOnFailure": true } }
   ]
 }

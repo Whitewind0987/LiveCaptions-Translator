@@ -2,6 +2,7 @@ using LiveCaptionsTranslator.audio;
 using LiveCaptionsTranslator.audio.windows;
 using LiveCaptionsTranslator.ipc;
 using LiveCaptionsTranslator.worker;
+using LiveCaptionsTranslator.captioning;
 
 namespace LiveCaptionsTranslator.tools.asrworkerprobe;
 
@@ -25,8 +26,8 @@ internal static class Program
         Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; cancellation.Cancel(); };
         try
         {
-            return options.Audio
-                ? await RunAudioAsync(options, cancellation.Token).ConfigureAwait(false)
+            if (options.Wav != null) return await RunWaveAsync(options, cancellation.Token).ConfigureAwait(false);
+            return options.Audio ? await RunAudioAsync(options, cancellation.Token).ConfigureAwait(false)
                 : await RunSyntheticAsync(options, cancellation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { Console.WriteLine("Requested cancellation completed cleanly."); return 0; }
@@ -40,7 +41,7 @@ internal static class Program
         try
         {
         var total = System.Diagnostics.Stopwatch.StartNew();
-        await using var supervisor = new AsrWorkerSupervisor(options.Worker);
+        await using var supervisor = new AsrWorkerSupervisor(options.Worker, recognition: CreateRecognition(options));
         var result = await supervisor.StartAsync(cancellationToken).ConfigureAwait(false);
         if (!result.Success) throw new InvalidOperationException(result.FailureReason);
         var originalSession = result.SessionId!.Value;
@@ -126,8 +127,18 @@ internal static class Program
     private static async Task<int> RunAudioAsync(ProbeOptions options, CancellationToken cancellationToken)
     {
         var capture = new AudioCaptureService(new WindowsAudioEndpointProvider(), new WasapiLoopbackCaptureRuntimeFactory());
-        var supervisor = new AsrWorkerSupervisor(options.Worker);
+        var supervisor = new AsrWorkerSupervisor(options.Worker, recognition: CreateRecognition(options));
         var pipeline = new AudioWorkerPipeline(capture, supervisor);
+        var captionGate = new CaptionEventGate();
+        var captionEvents = new List<CaptionEvent>();
+        var captionRejected = false;
+        pipeline.CaptionEventReceived += (_, captionEvent) =>
+        {
+            var accepted = captionGate.TryAccept(captionEvent, out var _rejection);
+            captionRejected |= !accepted;
+            if (captionEvents.Count < 256) captionEvents.Add(captionEvent);
+            PrintCaption(captionEvent, accepted);
+        };
         var sessions = new List<AudioSessionSnapshot>();
         var disposalFailures = new List<Exception>();
         Exception? operationFailure = null;
@@ -229,8 +240,68 @@ internal static class Program
                 second.WorkerProcessId,
                 secondAccepted) ? 0 : 1;
         }
-        return IsCleanAudioSession(final, requireAudio: true) ? 0 : 1;
+        var recognitionAccepted = !options.Recognition || (!captionRejected && captionEvents.FirstOrDefault()?.Kind == CaptionEventKind.Reset && captionEvents.Any(value => value.Kind == CaptionEventKind.Final && !string.IsNullOrWhiteSpace(value.Text)));
+        return IsCleanAudioSession(final, requireAudio: true) && recognitionAccepted ? 0 : 1;
     }
+
+    private static WorkerRecognitionConfiguration CreateRecognition(ProbeOptions options) => options.Recognition
+        ? WorkerRecognitionConfiguration.Create(options.VadModel!, options.WhisperModel!, options.Language, options.Threads)
+        : WorkerRecognitionConfiguration.Disabled;
+
+    private static async Task<int> RunWaveAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        var fixture = WaveFixtureReader.Read(options.Wav!);
+        var events = new List<CaptionEvent>();
+        var gate = new CaptionEventGate();
+        var rejected = false;
+        var recognition = CreateRecognition(options);
+        await using var supervisor = new AsrWorkerSupervisor(options.Worker, recognition: recognition);
+        var started = await supervisor.StartAsync(cancellationToken).ConfigureAwait(false);
+        if (!started.Success) throw new WorkerTransportException(started.FailureKind, started.FailureReason ?? "Recognition worker failed to start.");
+        var transport = supervisor.ActiveTransport ?? throw new InvalidOperationException("Worker transport is unavailable.");
+        transport.CaptionEventReceived += (_, captionEvent) =>
+        {
+            var accepted = gate.TryAccept(captionEvent, out var _rejection);
+            rejected |= !accepted;
+            if (events.Count < 256) events.Add(captionEvent);
+            PrintCaption(captionEvent, accepted);
+        };
+        var capture = Guid.NewGuid();
+        var worker = started.SessionId!.Value;
+        await transport.StartAudioStreamAsync(new StartAudioStreamPayload(worker, capture, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), cancellationToken).ConfigureAwait(false);
+        await supervisor.SetStreamingAsync(true, cancellationToken).ConfigureAwait(false);
+        var timestamp = DateTimeOffset.UtcNow;
+        for (var index = 0; index < fixture.FrameCount; ++index)
+        {
+            var pcm = fixture.Pcm.AsSpan(index * 640, 640).ToArray();
+            var frame = new NormalizedAudioFrame(capture, index + 1, index * 320L, timestamp.AddMilliseconds(index * 20L), pcm);
+            await transport.SendAudioFrameAsync(worker, frame, cancellationToken).ConfigureAwait(false);
+        }
+        var frames = fixture.FrameCount;
+        await transport.EndAudioStreamAsync(new AudioStreamEndPayload(worker, capture, frames, frames * 640L, 1, frames, 0), cancellationToken).ConfigureAwait(false);
+        var summary = await transport.StopAudioStreamAsync(worker, capture, cancellationToken).ConfigureAwait(false);
+        await supervisor.SetStreamingAsync(false, cancellationToken).ConfigureAwait(false);
+        var beforeStop = supervisor.Diagnostics;
+        await supervisor.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        var final = supervisor.Diagnostics;
+        Console.WriteLine($"WAV frames: {frames}; final-frame padding: {fixture.PaddedBytes} bytes");
+        Console.WriteLine($"Worker summary: {summary.FramesReceived} frames, {summary.PcmBytesReceived} bytes, {summary.SequenceGaps} gaps, {summary.InvalidFrames} invalid");
+        Console.WriteLine($"Capabilities: {beforeStop.Capabilities}; heartbeat failures: {beforeStop.HeartbeatFailures}");
+        Console.WriteLine($"Final worker state: {final.State}; graceful: {final.GracefulShutdownSucceeded}; forced: {final.ForcedTerminationUsed}; exit: {final.ProcessExitCode}");
+        foreach (var line in final.RecentStdout) Console.WriteLine($"Worker diagnostic: {line}");
+        var finals = events.Where(value => value.Kind == CaptionEventKind.Final).ToArray();
+        foreach (var value in finals) Console.WriteLine($"Final transcript: {value.Text}");
+        var tokensMatch = options.ExpectedTokens.All(token => finals.Any(value => ExpectedCaptionMatcher.Contains(value.Text, token)));
+        var capabilities = WorkerCapabilities.ProtocolV1 | WorkerCapabilities.NormalizedPcmSink | WorkerCapabilities.Vad | WorkerCapabilities.Whisper | WorkerCapabilities.CaptionProduction;
+        var finalRequirementMet = options.ExpectedTokens.Count == 0 || finals.Length != 0;
+        return !rejected && events.FirstOrDefault()?.Kind == CaptionEventKind.Reset && finalRequirementMet && tokensMatch &&
+            summary.FramesReceived == frames && summary.PcmBytesReceived == frames * 640L && summary.SequenceGaps == 0 && summary.InvalidFrames == 0 &&
+            beforeStop.Capabilities == capabilities && beforeStop.HeartbeatFailures == 0 && final.GracefulShutdownSucceeded &&
+            !final.ForcedTerminationUsed && final.ProcessExitCode == 0 && final.CleanupFailures.Count == 0 && final.WorkerPid == null ? 0 : 1;
+    }
+
+    private static void PrintCaption(CaptionEvent value, bool accepted) => Console.WriteLine(
+        $"CaptionEvent session={value.SessionId:D} sequence={value.Sequence} segment={value.SegmentId} revision={value.Revision} kind={value.Kind} audio={value.AudioStartMilliseconds?.ToString() ?? "-"}-{value.AudioEndMilliseconds?.ToString() ?? "-"} accepted={accepted} text={value.Text}");
 
     private static async Task<(Guid SessionId, int ProcessId)> StartAudioSessionAsync(
         AudioWorkerPipeline pipeline,
@@ -438,5 +509,5 @@ internal static class Program
         if (!condition(supervisor.Diagnostics)) throw new TimeoutException("Worker cleanup diagnostics did not settle.");
     }
 
-    private static void Usage() => Console.Error.WriteLine("AsrWorkerProbe --worker <exe> (--synthetic|--audio) [--device default|id] [--duration N] [--restart|--controlled-exit] [--slow-worker] [--cancel-after-ms N]");
+    private static void Usage() => Console.Error.WriteLine("AsrWorkerProbe --worker <exe> (--synthetic|--audio|--wav <pcm16.wav>) [--device default|id] [--duration N] [--restart|--controlled-exit] [--slow-worker] [--cancel-after-ms N] [--recognition --vad-model <absolute.onnx> --whisper-model <absolute.bin> [--language auto|code] [--threads N] [--expected-token text]]");
 }

@@ -1,5 +1,6 @@
 using LiveCaptionsTranslator.audio;
 using LiveCaptionsTranslator.ipc;
+using LiveCaptionsTranslator.captioning;
 
 namespace LiveCaptionsTranslator.worker
 {
@@ -32,6 +33,16 @@ namespace LiveCaptionsTranslator.worker
         private readonly List<string> cleanupFailures = [];
         private AudioWorkerPipelineState state;
         private bool disposed;
+        private IAsrWorkerTransport? captionTransport;
+        private long captionGeneration;
+        private bool captionDeliveryEnabled;
+        private int captionPublications;
+        private TaskCompletionSource captionPublicationsChanged = NewSignal();
+        private readonly AsyncLocal<int> captionPublicationDepth = new();
+        private readonly Queue<(CaptionEvent Event, long Generation)> captionQueue = [];
+        private bool captionDispatcherScheduled;
+
+        private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public AudioWorkerPipeline(AudioCaptureService capture, AsrWorkerSupervisor supervisor)
             : this(capture, supervisor, AudioPumpDrainOptions.Default, null)
@@ -53,6 +64,7 @@ namespace LiveCaptionsTranslator.worker
         }
 
         public AudioWorkerPipelineState State { get { lock (stateLock) return state; } }
+        public event EventHandler<CaptionEvent>? CaptionEventReceived;
         public AudioWorkerPipelineDiagnostics Diagnostics
         {
             get { lock (stateLock) return new(state, capture.Diagnostics, pump?.Diagnostics ?? lastPumpDiagnostics, pumpJoined, summary, failureKind, failureReason, cleanupFailures.ToArray()); }
@@ -75,6 +87,13 @@ namespace LiveCaptionsTranslator.worker
                 if (!captureResult.Success || captureResult.SessionId == null) throw new WorkerTransportException(AsrWorkerFailureKind.AudioCaptureFailed, captureResult.FailureReason ?? "Audio capture failed to start.");
                 captureSessionId = captureResult.SessionId.Value;
                 var transport = supervisor.ActiveTransport ?? throw new WorkerTransportException(AsrWorkerFailureKind.ControlPipeClosed, "Worker transport is unavailable.");
+                lock (stateLock)
+                {
+                    captionTransport = transport;
+                    captionDeliveryEnabled = true;
+                    captionGeneration++;
+                }
+                transport.CaptionEventReceived += OnCaptionEventReceived;
                 await transport.StartAudioStreamAsync(new StartAudioStreamPayload(worker.SessionId!.Value, captureSessionId, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), cancellationToken).ConfigureAwait(false);
                 sessionCancellation = new CancellationTokenSource();
                 pump = new AudioFramePump(capture.FrameBuffer, transport, worker.SessionId.Value, captureSessionId, 1);
@@ -154,6 +173,15 @@ namespace LiveCaptionsTranslator.worker
             var pumpDrainedNormally = pumpTask == null;
             try
             {
+                IAsrWorkerTransport? subscribedTransport;
+                lock (stateLock)
+                {
+                    captionDeliveryEnabled = false;
+                    captionGeneration++;
+                    subscribedTransport = captionTransport;
+                    captionTransport = null;
+                }
+                if (subscribedTransport != null) subscribedTransport.CaptionEventReceived -= OnCaptionEventReceived;
                 if (!normalStop) RequestPumpCancellation(originalReason ?? "Terminal pipeline cleanup requested pump cancellation.");
                 try
                 {
@@ -216,6 +244,20 @@ namespace LiveCaptionsTranslator.worker
                 try { sessionCancellation?.Dispose(); } catch (Exception ex) { failures.Add($"Session cancellation disposal failed: {ex.Message}"); }
                 sessionCancellation = null; pumpTask = null; pump = null;
 
+                if (captionPublicationDepth.Value == 0)
+                {
+                    while (true)
+                    {
+                        Task wait;
+                        lock (stateLock)
+                        {
+                            if (captionPublications == 0) break;
+                            wait = captionPublicationsChanged.Task;
+                        }
+                        await wait.ConfigureAwait(false);
+                    }
+                }
+
                 lock (stateLock)
                 {
                     cleanupFailures.AddRange(failures);
@@ -225,6 +267,79 @@ namespace LiveCaptionsTranslator.worker
                 }
             }
             finally { lifecycle.Release(); }
+        }
+
+        private void OnCaptionEventReceived(object? sender, CaptionEvent captionEvent)
+        {
+            long generation;
+            var overflow = false;
+            var schedule = false;
+            lock (stateLock)
+            {
+                if (!captionDeliveryEnabled || captionEvent.SessionId != captureSessionId) return;
+                generation = captionGeneration;
+                captionPublications++;
+                if (captionQueue.Count >= 64)
+                {
+                    captionPublications--;
+                    overflow = true;
+                }
+                else
+                {
+                    captionQueue.Enqueue((captionEvent, generation));
+                    if (!captionDispatcherScheduled) { captionDispatcherScheduled = true; schedule = true; }
+                }
+            }
+            if (overflow)
+            {
+                _ = BeginTerminalCleanup(AsrWorkerFailureKind.ProtocolViolation,
+                    "Pipeline caption publication queue exceeded its bounded capacity.", normalStop: false);
+            }
+            else if (schedule) ThreadPool.QueueUserWorkItem(_ => DrainCaptionQueue());
+        }
+
+        private void DrainCaptionQueue()
+        {
+            while (true)
+            {
+                (CaptionEvent Event, long Generation) publication;
+                lock (stateLock)
+                {
+                    if (captionQueue.Count == 0) { captionDispatcherScheduled = false; return; }
+                    publication = captionQueue.Dequeue();
+                }
+                PublishCaptionEvent(publication.Event, publication.Generation);
+            }
+        }
+
+        private void PublishCaptionEvent(CaptionEvent captionEvent, long generation)
+        {
+            captionPublicationDepth.Value++;
+            try
+            {
+                foreach (EventHandler<CaptionEvent> handler in CaptionEventReceived?.GetInvocationList() ?? [])
+                {
+                    lock (stateLock)
+                    {
+                        if (!captionDeliveryEnabled || captionGeneration != generation || captionEvent.SessionId != captureSessionId) return;
+                    }
+                    try { handler(this, captionEvent); }
+                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Pipeline caption subscriber failed: {ex}"); }
+                }
+            }
+            finally
+            {
+                captionPublicationDepth.Value--;
+                lock (stateLock)
+                {
+                    captionPublications--;
+                    if (captionPublications == 0)
+                    {
+                        captionPublicationsChanged.TrySetResult();
+                        captionPublicationsChanged = NewSignal();
+                    }
+                }
+            }
         }
 
         private async Task<PumpDrainResult> DrainPumpAsync(

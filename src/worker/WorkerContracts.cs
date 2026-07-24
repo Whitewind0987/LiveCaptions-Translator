@@ -1,4 +1,5 @@
 using LiveCaptionsTranslator.ipc;
+using LiveCaptionsTranslator.captioning;
 
 namespace LiveCaptionsTranslator.worker
 {
@@ -20,6 +21,11 @@ namespace LiveCaptionsTranslator.worker
         ControlPipeClosed,
         AudioPipeClosed,
         WorkerReportedError,
+        InvalidRecognitionConfiguration,
+        ModelLoadFailed,
+        VadInferenceFailed,
+        WhisperInferenceFailed,
+        RecognitionDrainTimeout,
         WorkerExited,
         AudioCaptureFailed,
         AudioPumpFailed,
@@ -77,7 +83,7 @@ namespace LiveCaptionsTranslator.worker
         string? FailureReason,
         IReadOnlyList<string> CleanupFailures);
 
-    public sealed record WorkerLaunchRequest(string ExecutablePath, string ControlPipeName, string AudioPipeName, Guid SessionId, int ParentPid, byte[] AuthenticationNonce);
+    public sealed record WorkerLaunchRequest(string ExecutablePath, string ControlPipeName, string AudioPipeName, Guid SessionId, int ParentPid, byte[] AuthenticationNonce, WorkerRecognitionConfiguration? Recognition = null);
 
     public interface IWorkerProcess : IAsyncDisposable
     {
@@ -101,6 +107,7 @@ namespace LiveCaptionsTranslator.worker
     {
         event EventHandler<AudioStreamSummaryPayload>? ProgressReceived;
         event EventHandler<ErrorPayload>? ErrorReceived;
+        event EventHandler<CaptionEvent>? CaptionEventReceived { add { } remove { } }
         long ControlMessagesSent { get; }
         long ControlMessagesReceived { get; }
         long AudioFramesSent { get; }

@@ -206,6 +206,20 @@ cmake --build --preset windows-x64-release
 ctest --preset windows-x64-release
 ```
 
+Stage 5 CPU recognition uses the separate presets below. They require explicit
+local `LCT_WHISPER_SOURCE_DIR` and `LCT_ONNXRUNTIME_DIR` cache paths (the checked
+in preset points at the ignored `.deps/stage5/` developer layout):
+
+```powershell
+cmake --preset windows-x64-recognition
+cmake --build --preset windows-x64-recognition-release
+ctest --preset windows-x64-recognition-release
+```
+
+The transport-only presets must remain independent of recognition dependencies.
+Recognition model paths are runtime arguments and must never be downloaded by
+ordinary application startup.
+
 Build and run the Stage 4 developer probe with an explicit worker path:
 
 ```powershell

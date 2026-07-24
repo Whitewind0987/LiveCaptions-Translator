@@ -370,3 +370,7 @@ FodyWeavers.xsd
 # Stage 4 native worker and probe artifacts
 /native/AsrWorker/build/
 /tools/AsrWorkerProbe/*.wav
+
+# Stage 5 local recognition dependencies, models, and fixtures
+/.deps/
+/tools/AsrWorkerProbe/fixtures/

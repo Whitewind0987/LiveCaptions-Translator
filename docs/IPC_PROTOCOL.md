@@ -1,13 +1,12 @@
 # IPC Protocol v1.0
 
-## Goals and Stage 4 boundary
+## Goals and Stage 4/5 boundary
 
 Protocol 1.0 is the local, binary contract between the WPF host and the
-separately built `LiveCaptionsAsrWorker.exe`. Stage 4 transports normalized
-audio and lifecycle diagnostics only. The worker validates, counts, and
-discards PCM. It does not load VAD, Whisper, CUDA, or models and does not emit
-captions during normal operation. `CaptionEvent` exists solely to establish the
-future wire contract.
+separately built `LiveCaptionsAsrWorker.exe`. The Stage 4 transport-only build
+validates, counts, and discards normalized PCM. The opt-in Stage 5 CPU build
+loads explicitly configured Silero/Whisper models and emits `CaptionEvent` over
+the same protocol without changing its version or wire layout.
 
 The protocol is little-endian except for Guid fields, which use the 16 RFC 4122
 bytes in textual/network order. No native structure or .NET-specific Guid byte
@@ -124,8 +123,9 @@ frames i64; first timestamp i64; last timestamp i64. Progress is bounded to
 once per 50 accepted frames. The final summary is sent after stream stop.
 
 Capability bits are: bit 0 protocol v1, bit 1 normalized PCM sink, bit 2 VAD,
-bit 3 Whisper, bit 4 CUDA, and bit 5 caption production. The Stage 4 worker sets
-only bits 0 and 1.
+bit 3 Whisper, bit 4 CUDA, and bit 5 caption production. Transport-only sets
+only bits 0 and 1. Recognition requires bits 0, 1, 2, 3 and 5 and never sets
+CUDA bit 4.
 
 ## CaptionEvent payload
 
@@ -142,8 +142,10 @@ The payload maps without semantic changes to the Stage 2 model:
 9. audio-end-present byte and optional audio-end milliseconds i64;
 10. emitted-at Unix milliseconds i64.
 
-The C# codec constructs the existing validated `CaptionEvent`; it is not wired
-to `CaptionSourceHost` or `Translator` in Stage 4.
+The C# codec constructs the existing validated `CaptionEvent`. Stage 5 accepts
+it only as unsolicited control traffic with an empty correlation ID and exposes
+it through transport/pipeline notifications. It is not wired to
+`CaptionSourceHost` or `Translator`.
 
 ## Normalized audio frame
 
@@ -193,6 +195,7 @@ StartAudioStream
 → AudioStreamStarted
 → AudioFrame* (+ bounded AudioProgress)
 → AudioStreamEnd (audio pipe)
+→ finish VAD/mandatory Final inference and publish CaptionEvent*
 → StopAudioStream
 → AudioStreamStopped
 ```
@@ -223,8 +226,13 @@ is bounded; on timeout, only the owned process tree is terminated. Process exit,
 pipe loss, protocol rejection, heartbeat timeout, capture failure, audio-pump
 failure, forced-termination failure, and cleanup failure have typed managed
 failure kinds. Human-readable text supplements but never determines the kind.
-An unsolicited worker `Error` becomes `WorkerReportedError`; it is not folded
-into a generic protocol or pipe-closure result.
+Worker error values 0 through 4 remain `ProtocolViolation`,
+`InvalidStreamState`, `InvalidAudioFrame`, `ParentExited`, and
+`InternalFailure`. Stage 5 adds values 5 through 9:
+`InvalidRecognitionConfiguration`, `ModelLoadFailed`, `VadInferenceFailed`,
+`WhisperInferenceFailed`, and `RecognitionDrainTimeout`. These map to matching
+managed kinds; classification never parses diagnostic text. Other unsolicited
+worker errors become `WorkerReportedError` rather than generic pipe failures.
 The transport exposes one stored typed terminal completion. A monitor only
 records/signals the first terminal request and returns. A separately owned,
 tracked coordinator begins cleanup after that origin can exit and can therefore
@@ -246,10 +254,11 @@ and compare every byte for all 13 vectors, including both audio-binding
 messages. This locks field order, integer width, Guid order, timestamps, UTF-8,
 caption encoding, `AudioStreamEnd`, and the exact 700-byte audio frame.
 
-## Stage 4 limitations
+## Stage 4/5 limitations
 
 Stage 4 is developer-probe and future-coordinator infrastructure. Ordinary WPF
 startup does not construct the supervisor, start capture, or launch the worker.
-No packaging resolver is integrated. No VAD, Whisper, CUDA, model handling,
-recognition, production captions, or translation integration exists; those
-remain explicitly approved future stages.
+No packaging resolver or model manager is integrated. Stage 5 is CPU-only and
+uses explicit local model/runtime paths. CUDA, production `ICaptionSource`
+integration, translation/UI/history routing, automatic downloads and ordinary
+application startup integration remain future work.

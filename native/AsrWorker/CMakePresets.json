@@ -4,7 +4,7 @@
     {
       "name": "windows-x64",
       "displayName": "Windows x64",
-      "generator": "Visual Studio 18 2026",
+      "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-x64",
       "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }
@@ -12,7 +12,7 @@
     {
       "name": "windows-arm64",
       "displayName": "Windows ARM64 (requires installed ARM64 MSVC tools)",
-      "generator": "Visual Studio 18 2026",
+      "generator": "Visual Studio 17 2022",
       "architecture": "ARM64",
       "binaryDir": "${sourceDir}/build/arm64",
       "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }

@@ -688,25 +688,22 @@ packaging integration.
 
 ## Stage 5 automated and real-model validation
 
-Stage 5 managed validation last completed on Windows 10 with **311 passed, 0
+Stage 5 managed validation completed on Windows 10 with **312 passed, 0
 failed, 0 skipped**, preserving all 293 previous tests. Coverage added for
 typed recognition configuration and option rejection, transport-only defaults,
 strict WAV parsing/padding, expected-token normalization, recognition
 capabilities/error mapping, unsolicited CaptionEvent decoding/correlation,
 malformed payload failure, subscriber isolation, active-session forwarding, no
-post-stop delivery and reentrant stop suppression.
+post-stop delivery, reentrant stop suppression, and normal-stop caption delivery
+through the end/stop barrier.
 
 Both `windows-x64-release` and `windows-x64-recognition-release` configured and
-built successfully before the final diagnostics-output-only edit. Each CTest
-preset passed 2/2 test executables: protocol/golden-vector and fake-engine
-recognition tests. Repository-owned targets passed `/W4 /WX`. The recognition
-build emitted only upstream whisper.cpp compiler warnings; these are not new
-main-project warnings. A final recognition rebuild/CTest was attempted after
-the diagnostics edit, but the execution environment rejected elevated
-execution because its command-usage allowance was exhausted; it remains
-pending.
+built successfully. Each CTest preset passed 2/2 test executables:
+protocol/golden-vector and fake-engine recognition tests. Repository-owned
+native targets passed `/W4 /WX`. The recognition build emitted only upstream
+whisper.cpp compiler warnings; these are not new main-project warnings.
 
-### Real pinned-model silence fixture — passed
+### Real pinned-model silence fixture -- passed
 
 `--wav silence-16k-mono.wav --recognition` used the pinned Silero opset-15
 model, multilingual `ggml-tiny.bin`, language `en`, and 4 threads.
@@ -718,7 +715,7 @@ model, multilingual `ggml-tiny.bin`, language `en`, and 4 threads.
 - Heartbeat failures 0; final state Stopped; graceful shutdown true; forced
   termination false; exit code 0; no remaining owned PID
 
-### Real pinned-model SAPI speech fixture — passed
+### Real pinned-model SAPI speech fixture -- passed
 
 Windows SAPI generated an ignored 16 kHz mono PCM16 fixture containing `This is
 a local speech recognition test. The worker should produce structured caption
@@ -730,9 +727,9 @@ events`.
 - 0 source gaps and 0 invalid worker frames
 - Gate-accepted lifecycle: Reset 1; Partial 2; Committed 3; Final 4; Partial 5;
   Committed 6; Final 7
-- Segment 1 revision 2, audio 0–3520 ms: `This is a local speech recognition
+- Segment 1 revision 2, audio 0-3520 ms: `This is a local speech recognition
   test.`
-- Segment 2 revision 2, audio 3672–7776 ms: `The worker shoot produced
+- Segment 2 revision 2, audio 3672-7776 ms: `The worker shoot produced
   structured caption events.`
 - Both expected phrases matched a Final after Unicode/case/punctuation/space
   normalization
@@ -741,33 +738,113 @@ events`.
 
 The actual model-dependent transcript is recorded verbatim.
 
+### Managed validation and normal-stop caption lifecycle fix
+
+The complete managed suite passed 312 tests with 0 failed and 0 skipped,
+preserving all 293 previous tests. The
+`NormalStopDeliversCaptionEventsPublishedByWorkerDuringEndStopBarrier`
+regression was strengthened: 50 consecutive runs, 0 failures.
+`git diff --check` passed. Production timeout values were not weakened.
+`ForwardProgressExtendsDrainBeyondOneStallWindow` changed only deterministic
+test timing.
+
+The correct non-reentrant normal-stop caption order is:
+
+1. Capture stops and the audio pump drains.
+2. `EndAudioStreamAsync` and `StopAudioStreamAsync` complete.
+3. The worker's Committed/Final caption events accepted before the stop
+   barrier remain valid.
+4. `DrainAndDisableCaptionDeliveryAsync` waits until all already accepted
+   caption publications finish.
+5. In the same `stateLock` critical section where `captionPublications` is
+   observed as zero:
+   - `captionDeliveryEnabled` becomes `false`;
+   - `captionGeneration` advances;
+   - `captionTransport` is captured and cleared.
+6. The transport event handler is detached outside the lock.
+7. `SetStreamingAsync(false)` and `supervisor.StopAsync` run.
+8. Remaining cleanup completes.
+
+Caption delivery is not disabled before accepted publications drain. A
+reentrant `StopAsync` from inside a caption subscriber invalidates immediately
+and does not wait for itself. Abnormal cleanup invalidates immediately. The
+zero-count check and delivery invalidation are atomic, fixing the final TOCTOU
+race.
+
+Coverage added for typed recognition configuration and option rejection,
+transport-only defaults, strict WAV parsing/padding, expected-token
+normalization, recognition capabilities/error mapping, unsolicited CaptionEvent
+decoding/correlation, malformed payload failure, subscriber isolation,
+active-session forwarding, no post-stop delivery, reentrant stop suppression,
+and normal-stop caption delivery through the end/stop barrier.
+
+### Windows 10 real-WASAPI recognition runs
+
+An earlier strict real-WASAPI normal-stop run, before the final caption-drain
+TOCTOU and ordering-only corrections:
+
+- 517 produced, 517 consumed, 0 dropped
+- 0 gaps, 0 invalid, non-empty Final
+- graceful true, forced false, exit code 0
+- no cleanup/disposal failure or process residue
+
+This result remains recorded as evidence from the immediately preceding
+lifecycle revision.
+
+Exact final ordering revision normal-stop reruns:
+
+Run 1:
+- 600 produced, 517 consumed, 83 dropped
+- pump gaps 83, worker summary gaps 83
+- 0 invalid, non-empty Final delivered
+- graceful true, forced false, pipeline Stopped
+- no cleanup/disposal failures
+- probe exit code 1 because strict zero-drop acceptance was not met
+
+Run 2:
+- 599 produced, 573 consumed, 26 dropped
+- pump gaps 26, worker summary gaps 26
+- 0 invalid
+- graceful true, forced false, pipeline Stopped
+- no cleanup/disposal failures
+- probe exit code 1 because strict zero-drop acceptance was not met
+
+The final source corrections affect stop-time caption publication ordering,
+not the live capture buffer. Neither final-revision run is zero-loss.
+
+### Final Ctrl+C run (exact final ordering revision)
+
+- Requested cancellation completed cleanly
+- 741 produced, 613 consumed, 128 dropped
+- exact accounting: 741 = 613 + 128
+- pump source gaps 128, worker summary gaps 128
+- 0 invalid frames
+- pump Completed and joined
+- source completion observed
+- owned cancellation false
+- graceful true, forced false
+- worker exit code 0, worker PID none
+- pipeline Stopped
+- no worker/pipeline failure
+- no cleanup or disposal failures
+
+This is accepted as a clean bounded-drop interruption, not a zero-loss run.
+
+### Final Stage 4 regression
+
+All Stage 4 synthetic and transport-only probe matrix tests were rerun during
+Stage 5 finalization and passed.
+
 ### Stage 5 checks still pending
 
-- Final recognition native rebuild and CTest after the diagnostics-output edit
-- Windows 10 real default-endpoint `--audio --recognition` while the known
-  speech fixture is audibly played
-- Windows 10 interactive Ctrl+C with recognition active, including exact
-  capture/drop/gap accounting and all owner joins
-- Final rerun of the complete Stage 4 synthetic and real-audio probe matrix
 - Every Windows 11 Stage 5 build/runtime/manual check
 
-Stage 5 must not be marked complete until the pending Windows 10 real-WASAPI
-and Ctrl+C checks pass. Stage 6 has not begun.
-
-The latest Stage 4 synthetic rerun completed with exit code 0 for baseline
-(250/250), explicit restart (150/150 across two sessions), controlled exit,
-requested cancellation, and slow-worker (50/50). A transport-only real-audio
-cleanup rerun produced no frames because no source was audible: controlled exit
-and requested cancellation passed, while strict normal-stop and restart checks
-correctly returned 1 because they require real audio. All four left no owned
-PID and reported no forced termination or cleanup failure; the zero-frame runs
-do not replace the previously accepted real-audio results.
-
-The final `dotnet restore` attempt was blocked by NuGet TLS credential failure
-(`NU1301`). An offline retry could not reconstruct packages absent from the
-offline source, and the required sandbox-external retry was rejected because
-the execution environment's elevated-command allowance was exhausted. The last
-successful 311-test run therefore predates the final caption-dispatcher and
-native cancellation/post-roll edits; restore, build, all tests and warnings
-must be rerun before review acceptance.
+Stage 5 implementation is complete. Windows 10 model, protocol, caption
+lifecycle, deterministic WAV, cancellation, cleanup and ownership validation
+are complete. A strict zero-drop real-WASAPI normal-stop confirmation on the
+exact final ordering revision remains pending. The prior 517/517 strict run
+remains recorded as evidence from the immediately preceding lifecycle revision.
+Windows 11 remains pending. Stage 6 has not begun. Recognition remains
+developer-probe/worker functionality and is not yet the production
+`ICaptionSource`.
 

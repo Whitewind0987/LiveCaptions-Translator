@@ -173,15 +173,7 @@ namespace LiveCaptionsTranslator.worker
             var pumpDrainedNormally = pumpTask == null;
             try
             {
-                IAsrWorkerTransport? subscribedTransport;
-                lock (stateLock)
-                {
-                    captionDeliveryEnabled = false;
-                    captionGeneration++;
-                    subscribedTransport = captionTransport;
-                    captionTransport = null;
-                }
-                if (subscribedTransport != null) subscribedTransport.CaptionEventReceived -= OnCaptionEventReceived;
+                if (!normalStop) InvalidateCaptionDelivery();
                 if (!normalStop) RequestPumpCancellation(originalReason ?? "Terminal pipeline cleanup requested pump cancellation.");
                 try
                 {
@@ -238,25 +230,13 @@ namespace LiveCaptionsTranslator.worker
                     }
                 }
 
+                if (normalStop) await DrainAndDisableCaptionDeliveryAsync().ConfigureAwait(false);
+
                 try { await supervisor.SetStreamingAsync(false, CancellationToken.None).ConfigureAwait(false); } catch (InvalidOperationException) { }
                 try { await supervisor.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch (Exception ex) { failures.Add($"Worker stop failed: {ex.Message}"); }
                 sessionCancellation?.Cancel();
                 try { sessionCancellation?.Dispose(); } catch (Exception ex) { failures.Add($"Session cancellation disposal failed: {ex.Message}"); }
                 sessionCancellation = null; pumpTask = null; pump = null;
-
-                if (captionPublicationDepth.Value == 0)
-                {
-                    while (true)
-                    {
-                        Task wait;
-                        lock (stateLock)
-                        {
-                            if (captionPublications == 0) break;
-                            wait = captionPublicationsChanged.Task;
-                        }
-                        await wait.ConfigureAwait(false);
-                    }
-                }
 
                 lock (stateLock)
                 {
@@ -340,6 +320,52 @@ namespace LiveCaptionsTranslator.worker
                     }
                 }
             }
+        }
+
+        private void InvalidateCaptionDelivery()
+        {
+            IAsrWorkerTransport? subscribedTransport;
+            lock (stateLock)
+            {
+                captionDeliveryEnabled = false;
+                captionGeneration++;
+                subscribedTransport = captionTransport;
+                captionTransport = null;
+            }
+            if (subscribedTransport != null) subscribedTransport.CaptionEventReceived -= OnCaptionEventReceived;
+        }
+
+        private async Task DrainAndDisableCaptionDeliveryAsync()
+        {
+            if (captionPublicationDepth.Value != 0)
+            {
+                InvalidateCaptionDelivery();
+                return;
+            }
+
+            IAsrWorkerTransport? subscribedTransport = null;
+
+            while (true)
+            {
+                Task wait;
+                lock (stateLock)
+                {
+                    if (captionPublications == 0)
+                    {
+                        captionDeliveryEnabled = false;
+                        captionGeneration++;
+                        subscribedTransport = captionTransport;
+                        captionTransport = null;
+                        break;
+                    }
+
+                    wait = captionPublicationsChanged.Task;
+                }
+
+                await wait.ConfigureAwait(false);
+            }
+
+            if (subscribedTransport != null) subscribedTransport.CaptionEventReceived -= OnCaptionEventReceived;
         }
 
         private async Task<PumpDrainResult> DrainPumpAsync(

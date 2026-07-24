@@ -89,13 +89,13 @@ The planned audio path is:
 
 ```
 arbitrary application audio
-→ Windows audio engine
-→ [WPF] WASAPI loopback capture
-→ [WPF] resampling/channel conversion
-→ [WPF] normalized 16 kHz mono PCM
-→ [IPC] versioned named pipe
-→ [ASR worker] VAD (Silero)
-→ [ASR worker] whisper.cpp
+-> Windows audio engine
+-> [WPF] WASAPI loopback capture
+-> [WPF] resampling/channel conversion
+-> [WPF] normalized 16 kHz mono PCM
+-> [IPC] versioned named pipe
+-> [ASR worker] VAD (Silero)
+-> [ASR worker] whisper.cpp
 ```
 
 The WPF process owns capture and normalization, producing a stable input format
@@ -110,12 +110,12 @@ Stage 3 implements the part of the audio path that belongs in the WPF process:
 
 ```text
 active render endpoint
-→ NAudio WASAPI loopback callback
-→ streaming format decoder and channel downmix
-→ stateful linear resampling
-→ 16 kHz mono PCM16 little-endian
-→ 20 ms immutable frames
-→ bounded drop-oldest buffer
+-> NAudio WASAPI loopback callback
+-> streaming format decoder and channel downmix
+-> stateful linear resampling
+-> 16 kHz mono PCM16 little-endian
+-> 20 ms immutable frames
+-> bounded drop-oldest buffer
 ```
 
 The Windows-specific boundary is limited to endpoint enumeration and
@@ -311,8 +311,30 @@ authoritative Committed then Final with consecutive sequences and identical
 identity/text. Empty final output emits nothing without a Partial, or Reset when
 provisional text must be invalidated. Audio ranges derive from absolute samples.
 Stage 5 exposes these events from transport and pipeline only; it does not
-implement `ICaptionSource`, touch `Translator`, or change WPF startup. Stage 6
-has not begun.
+implement `ICaptionSource`, touch `Translator`, or change WPF startup.
+
+During normal pipeline stop the non-reentrant order is:
+
+1. Capture stops and the audio pump drains.
+2. `EndAudioStreamAsync` and `StopAudioStreamAsync` complete.
+3. The worker's Committed/Final caption events accepted before the stop
+   barrier remain valid.
+4. `DrainAndDisableCaptionDeliveryAsync` waits until all already accepted
+   caption publications finish.
+5. In the same `stateLock` critical section where `captionPublications` is
+   observed as zero:
+   - `captionDeliveryEnabled` becomes `false`;
+   - `captionGeneration` advances;
+   - `captionTransport` is captured and cleared.
+6. The transport event handler is detached outside the lock.
+7. `SetStreamingAsync(false)` and `supervisor.StopAsync` run.
+8. Remaining cleanup completes.
+
+Caption delivery is not disabled before accepted publications drain. A
+reentrant `StopAsync` from inside a caption subscriber invalidates immediately
+and does not wait for itself. Abnormal cleanup invalidates immediately. The
+zero-count check and delivery invalidation are atomic, fixing the final TOCTOU
+race. Stage 6 has not begun.
 
 ## Caption event lifecycle
 
@@ -394,13 +416,13 @@ The production flow is:
 
 ```text
 App lifecycle
-→ Translator caption-source lifecycle
-→ CaptionSourceHost
-→ ICaptionSource
-→ WindowsLiveCaptionsSource
-→ ILiveCaptionsRuntime
-→ LiveCaptionsRuntime
-→ LiveCaptionsHandler
+-> Translator caption-source lifecycle
+-> CaptionSourceHost
+-> ICaptionSource
+-> WindowsLiveCaptionsSource
+-> ILiveCaptionsRuntime
+-> LiveCaptionsRuntime
+-> LiveCaptionsHandler
 ```
 
 `Translator` constructs exactly one `WindowsLiveCaptionsSource` without native

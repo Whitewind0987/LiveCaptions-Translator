@@ -3,7 +3,6 @@
 ## Repository state
 
 - Branch: `feature/local-asr-integration`
-- Current committed HEAD: `d433820ec1ecb6d89bd69a330320ac9b940d0150`
 - Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
 - Stage 4 starting commit: `04e4f2c95ac98a8c32dbb7ae34b1a679a52835ad`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
@@ -17,12 +16,9 @@
   - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
     foundation implementation and automated cross-process validation
   - Stage 5 CPU recognition pipeline implementation and Windows 10 acceptance
-  - Stage 6.1 production Local ASR `ICaptionSource` adapter, committed at the
-    current HEAD
+  - Stage 6.1 production Local ASR `ICaptionSource` adapter
 - Current status: Stage 6.2 application caption-source ownership and selection
-  lifecycle implementation and final review are complete but uncommitted. The
-  working tree contains only its expected source/test changes plus the
-  documentation-only status update.
+  lifecycle implementation and final review are complete and committed.
 - Next stage: Stage 6.3 fixed-model/runtime provisioning, only after explicit
   approval. Stage 6.4 settings UI, Stage 6.5 WPF end-to-end Local ASR
   verification, and Stage 6.6 packaging/installation have not started.
@@ -497,8 +493,8 @@ Validation recorded for Stage 6.1:
 
 ## Stage 6.2 application ownership and selection
 
-Stage 6.2 implementation and final review are complete but currently
-uncommitted. The ownership chain is:
+Stage 6.2 implementation and final review are complete and committed. The
+ownership chain is:
 
 ```text
 App
@@ -537,8 +533,7 @@ Validation recorded for Stage 6.2:
 
 - Stage 5 recognition pipeline: **complete**
 - Stage 6.1 production `ICaptionSource` adapter: **complete**
-- Stage 6.2 application source ownership and selection lifecycle: **complete,
-  currently uncommitted**
+- Stage 6.2 application source ownership and selection lifecycle: **complete**
 - Stage 6.3 fixed-model/runtime provisioning: **next, not started**
 - Stage 6.4 settings persistence and UI: **not started**
 - Stage 6.5 WPF end-to-end Local ASR verification: **not started**

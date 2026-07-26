@@ -366,8 +366,8 @@ disposal is idempotent. Stage 6.1 changed no Stage 5 pipeline internals.
 
 ## Stage 6.2 application caption-source coordination
 
-Stage 6.2 implementation and final review are complete but currently
-uncommitted. The current ownership chain is:
+Stage 6.2 implementation and final review are complete and committed. The
+current ownership chain is:
 
 ```text
 App

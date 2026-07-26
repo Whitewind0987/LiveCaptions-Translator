@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using System.Windows;
 
 using LiveCaptionsTranslator.apis;
+using LiveCaptionsTranslator.captioning;
 
 namespace LiveCaptionsTranslator.models
 {
@@ -26,6 +27,7 @@ namespace LiveCaptionsTranslator.models
         private string prompt;
         private string? ignoredUpdateVersion;
         private string? audioOutputDeviceId;
+        private CaptionSourceKind captionSource = CaptionSourceKind.WindowsLiveCaptions;
         private string savePath = FILENAME;
         private bool autoSaveEnabled;
 
@@ -109,6 +111,31 @@ namespace LiveCaptionsTranslator.models
                 ignoredUpdateVersion = value;
                 OnPropertyChanged("IgnoredUpdateVersion");
             }
+        }
+
+        [JsonIgnore]
+        public CaptionSourceKind CaptionSource
+        {
+            get => captionSource;
+            set
+            {
+                var normalized = Enum.IsDefined(value)
+                    ? value
+                    : CaptionSourceKind.WindowsLiveCaptions;
+                if (captionSource == normalized)
+                    return;
+                captionSource = normalized;
+                OnPropertyChanged(nameof(CaptionSource));
+            }
+        }
+
+        [JsonInclude]
+        [JsonPropertyName("CaptionSource")]
+        [JsonConverter(typeof(CaptionSourcePreferenceJsonConverter))]
+        public string? PersistedCaptionSource
+        {
+            get => CaptionSourceToPersistedValue(captionSource);
+            private set => captionSource = NormalizeCaptionSource(value);
         }
 
         [JsonIgnore]
@@ -300,6 +327,8 @@ namespace LiveCaptionsTranslator.models
             }
 
             setting.audioOutputDeviceId = NormalizeAudioOutputDeviceId(setting.audioOutputDeviceId);
+            setting.captionSource = NormalizeCaptionSource(
+                CaptionSourceToPersistedValue(setting.captionSource));
             setting.savePath = jsonPath;
             setting.autoSaveEnabled = true;
 
@@ -326,18 +355,95 @@ namespace LiveCaptionsTranslator.models
 
         public void OnPropertyChanged([CallerMemberName] string? propName = null)
         {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
+            RaisePropertyChanged(propName);
             if (autoSaveEnabled)
                 Save(savePath);
         }
 
+        internal CaptionSourcePreferencePersistenceResult PersistCaptionSource(
+            CaptionSourceKind value)
+        {
+            var normalized = Enum.IsDefined(value)
+                ? value
+                : CaptionSourceKind.WindowsLiveCaptions;
+            if (captionSource == normalized)
+                return CaptionSourcePreferencePersistenceResult.Succeeded;
+
+            var previous = captionSource;
+            captionSource = normalized;
+            try
+            {
+                if (autoSaveEnabled)
+                    Save(savePath);
+            }
+            catch (Exception ex)
+            {
+                captionSource = previous;
+                RaisePropertyChanged(nameof(CaptionSource));
+                return CaptionSourcePreferencePersistenceResult.Failed(ex);
+            }
+
+            RaisePropertyChanged(nameof(CaptionSource));
+            return CaptionSourcePreferencePersistenceResult.Succeeded;
+        }
+
+        private void RaisePropertyChanged(string? propName) =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
+
         internal static string? NormalizeAudioOutputDeviceId(string? endpointId) =>
             string.IsNullOrWhiteSpace(endpointId) ? null : endpointId.Trim();
+
+        internal static CaptionSourceKind NormalizeCaptionSource(string? value) => value switch
+        {
+            "WindowsLiveCaptions" => CaptionSourceKind.WindowsLiveCaptions,
+            "LocalAsr" => CaptionSourceKind.LocalAsr,
+            _ => CaptionSourceKind.WindowsLiveCaptions
+        };
+
+        internal static string CaptionSourceToPersistedValue(CaptionSourceKind value) => value switch
+        {
+            CaptionSourceKind.LocalAsr => "LocalAsr",
+            _ => "WindowsLiveCaptions"
+        };
 
         public static bool IsConfigExist()
         {
             string jsonPath = Path.Combine(Directory.GetCurrentDirectory(), FILENAME);
             return File.Exists(jsonPath);
         }
+    }
+
+    internal sealed class CaptionSourcePreferenceJsonConverter : JsonConverter<string?>
+    {
+        public override string? Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.String)
+                return reader.GetString();
+            if (reader.TokenType == JsonTokenType.Null)
+                return null;
+
+            reader.Skip();
+            return null;
+        }
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            string? value,
+            JsonSerializerOptions options) =>
+            writer.WriteStringValue(value);
+    }
+
+    internal sealed record CaptionSourcePreferencePersistenceResult(
+        bool Success,
+        Exception? Failure)
+    {
+        internal static CaptionSourcePreferencePersistenceResult Succeeded { get; } =
+            new(true, null);
+
+        internal static CaptionSourcePreferencePersistenceResult Failed(Exception failure) =>
+            new(false, failure ?? throw new ArgumentNullException(nameof(failure)));
     }
 }

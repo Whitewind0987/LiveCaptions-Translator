@@ -886,9 +886,9 @@ Latest validation result:
 These tests use injected fake sources and factories. They do not provision
 worker/runtime/model files, expose a settings choice, or run Local ASR end to
 end through the WPF application. Stage 6.3 production provisioning validation
-is recorded below. Stage 6.4 settings UI, Stage 6.5 WPF end-to-end verification,
-and Stage 6.6 packaging remain untested and not started. All Windows 11 Local
-ASR checks remain pending.
+is recorded below. Later Stage 6.4 validation adds settings selection without
+constituting Stage 6.5 WPF end-to-end verification or Stage 6.6 packaging.
+All Windows 11 Local ASR checks remain pending.
 
 ## Stage 6.3 fixed provisioning and production-factory validation
 
@@ -930,7 +930,71 @@ Latest validation result:
 
 This validation did **not** run the real 77 MB `ggml-tiny.bin` through the WPF
 application, real Local ASR WPF end-to-end recognition, or installer and
-packaged-runtime verification. Stage 6.4 source-selection/settings UI, Stage
-6.5 real WPF recognition and routing/switch/shutdown acceptance, and Stage 6.6
-runtime/model distribution and package verification remain pending.
+packaged-runtime verification. Stage 6.4 source-selection/settings validation
+is recorded below. Stage 6.5 real WPF recognition and routing/switch/shutdown
+acceptance and Stage 6.6 runtime/model distribution and package verification
+remain pending.
+
+## Stage 6.4 persisted selection and settings UI validation
+
+Stage 6.4 is complete. The initial focused run passed 30 tests. Review fixes
+added 8 deterministic regressions, and the final focused Stage 6.4 result is
+**38 passed, 0 failed, 0 skipped**. The complete managed suite result is **429
+passed, 0 failed, 0 skipped**, preserving all previous 421 tests.
+
+Focused coverage verifies:
+
+- exact stable-string persistence for `WindowsLiveCaptions` and `LocalAsr`,
+  default migration for old settings, rejection and normalization of missing,
+  null, empty, whitespace, malformed, numeric, unknown, differently cased, and
+  unsupported values, and no autosave during load/migration;
+- direct persisted-source startup, with no Windows-then-Local transition, no
+  Local ASR provisioning query for Windows startup, lazy LocalAsr factory
+  validation, and no preference rewrite or fallback after startup failure;
+- fresh Local ASR prevalidation, Windows selection without Local provisioning,
+  serialized transitions, disabled overlap, persistence only after coordinator
+  success, cancellation/failure isolation, idempotent reselection, refresh
+  without selection, and retry after provisioning becomes ready;
+- separate activation and preference-save outcomes, including rollback to the
+  last successfully persisted in-memory value, no second coordinator
+  selection, no fallback, and a successful later persistence retry;
+- immutable status updates for persisted/active source, lifecycle, busy state,
+  provisioning, source failure, and preference failure;
+- settings-session disposal and rejection of queued callbacks from a previous
+  unloaded session;
+- safe UI diagnostics that retain readable path-free text, convert known
+  production assets to stable `asr\...` paths, hide unrelated drive and UNC
+  roots, and leave raw internal failure text unchanged.
+
+Validation results:
+
+- restore using only a command-scoped existing NuGet package cache: **passed**;
+- focused Stage 6.4 tests: **38 passed, 0 failed, 0 skipped**;
+- complete managed suite: **429 passed, 0 failed, 0 skipped**;
+- all previous managed tests preserved: **421**;
+- full rebuild: **passed, 0 errors**;
+- warning count: **380**, with no new compiler warning introduced;
+- `AudioCaptureProbe` build: **passed**;
+- `AsrWorkerProbe` build: **passed**;
+- probe warnings: existing offline vulnerability-source `NU1900` only;
+- `git diff --check`: **passed**.
+
+These deterministic tests use controlled settings, provisioning, coordinator,
+and settings-session boundaries. They do not require the authoritative 77 MB
+model files and did not run native recognition. Stage 6.4 makes Local ASR
+selectable and configurable but is not real WPF end-to-end acceptance.
+
+Stage 6.5 remains **next, not started**. It still requires real WPF startup with
+the production worker and authoritative models, real WASAPI loopback
+recognition, partial/final display, translation/history routing, real-resource
+switching and failure recovery, shutdown/process-cleanup acceptance, Windows 10
+end-to-end acceptance, and any required Windows 11 verification.
+
+Stage 6.6 remains **not started**. It still requires worker and ONNX Runtime
+distribution, authoritative Silero/Whisper deployment, installer integration,
+model download or external acquisition experience, package integrity and
+release-asset verification, and redistribution/license review. Multiple model
+sizes, model selection/deletion, file pickers, CUDA/GPU/DirectML, microphone
+input, automatic fallback, background provisioning polling, and filesystem
+watching remain out of scope.
 

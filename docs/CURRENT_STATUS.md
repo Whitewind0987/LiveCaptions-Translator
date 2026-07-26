@@ -18,11 +18,11 @@
   - Stage 5 CPU recognition pipeline implementation and Windows 10 acceptance
   - Stage 6.1 production Local ASR `ICaptionSource` adapter
   - Stage 6.2 application caption-source ownership and selection lifecycle
-- Current status: Stage 6.3 fixed runtime/model provisioning and production
-  Local ASR factory are complete.
-- Next stage: Stage 6.4 settings persistence and source-selection UI, only
-  after explicit approval. Stage 6.5 WPF end-to-end Local ASR verification and
-  Stage 6.6 packaging/installation have not started.
+  - Stage 6.3 fixed runtime/model provisioning and production Local ASR factory
+  - Stage 6.4 persisted caption-source selection and settings UI
+- Current status: Stage 6.4 is complete.
+- Next stage: Stage 6.5 real WPF Local ASR end-to-end verification, only after
+  explicit approval. Stage 6.6 packaging/installation has not started.
 
 ## Environment
 
@@ -103,11 +103,12 @@ The following root-level runtime files are ignored and were not committed:
 
 ### Known remaining Windows 10 incompatibility
 
-Normal Windows 10 application startup still has no configured real-time caption
-source. The application shows a warning and idles. The production Local ASR
-factory and fixed provisioning contract now exist, but ordinary users have no
-UI or persisted setting for selecting Local ASR, and the required runtime/model
-files are not distributed by the application.
+On Windows 10, the safe default `WindowsLiveCaptions` has no available real-time
+caption source when the operating-system feature is absent. The application
+shows a warning and idles. Users can now persist and select Local ASR through
+Settings, but real WPF end-to-end recognition acceptance is still Stage 6.5
+work and the required runtime/model files are not distributed by the
+application.
 
 ## Stage 2A implementation
 
@@ -460,8 +461,8 @@ exact final ordering revision remains pending. The prior 517/517 strict run
 remains recorded as evidence from the immediately preceding lifecycle revision.
 Windows 11 remains pending. Stage 5 is complete; its recognition pipeline is
 available through the Stage 6.1 production `ICaptionSource` boundary and the
-Stage 6.3 production factory. User-facing selection and real WPF end-to-end
-acceptance remain incomplete.
+Stage 6.3 production factory. Stage 6.4 provides user-facing persisted
+selection; real WPF end-to-end acceptance remains incomplete.
 
 ## Stage 6.1 production Local ASR source
 
@@ -570,6 +571,46 @@ Validation recorded for Stage 6.3:
 This validation did not run the real 77 MB Whisper model through WPF, real WPF
 Local ASR end-to-end recognition, or installer/packaged-runtime verification.
 
+## Stage 6.4 persisted selection and settings UI
+
+Stage 6.4 is complete. The existing `setting.json` stores a stable
+`CaptionSource` string with the exact value `WindowsLiveCaptions` or `LocalAsr`.
+New, older, missing, malformed, numeric, differently cased, and otherwise
+unsupported values normalize safely to `WindowsLiveCaptions` before autosave is
+enabled. Startup selects the persisted source directly, without a Windows-then-
+Local transition or an automatic fallback.
+
+The existing Settings page can select Windows Live Captions or Local ASR
+(offline), displays persisted and active source state separately, exposes
+lifecycle and Local ASR provisioning state, reports source/provisioning/save
+failures inline, supports explicit provisioning refresh, and disables duplicate
+actions while a serialized operation is active. Local selection performs fresh
+provisioning before coordinator selection; Windows selection bypasses Local ASR
+provisioning. Opening Settings and refresh inspect provisioning without
+starting capture, the worker, or named pipes.
+
+Successful activation and preference saving are separate outcomes. A save
+failure leaves the new source active, restores the in-memory preference to its
+last successfully saved value, displays a concise generic persistence failure,
+and permits retry without fallback or a second coordinator selection. UI-facing
+source and provisioning diagnostics replace known production absolute paths
+with stable `asr\...` paths and hide other drive/UNC roots, while raw diagnostic
+state remains internal. An unloaded Settings session unsubscribes, and queued
+callbacks from that session cannot update a newly loaded session.
+
+Stage 6.4 validation recorded 30 initial focused passes plus 8 review-fix
+regressions. The final focused result is 38 passed, 0 failed, 0 skipped; the
+complete managed suite is 429 passed, 0 failed, 0 skipped, preserving all 421
+previous tests. Restore passed using only a command-scoped existing NuGet
+package cache. The full rebuild passed with 0 errors and 380 warnings, with no
+new compiler warning. `AudioCaptureProbe` and `AsrWorkerProbe` builds passed;
+their `NU1900` diagnostics are the existing offline vulnerability-source
+warnings. `git diff --check` passed.
+
+This validation did not run real native recognition through the WPF
+application. It establishes selection, persistence, status, safe failure, and
+settings-session behavior only.
+
 ## Stage 6 roadmap and limitations
 
 - Stage 5 recognition pipeline: **complete**
@@ -577,19 +618,21 @@ Local ASR end-to-end recognition, or installer/packaged-runtime verification.
 - Stage 6.2 application source ownership and selection lifecycle: **complete**
 - Stage 6.3 fixed runtime/model provisioning and production factory:
   **complete**
-- Stage 6.4 settings persistence and source-selection UI: **next, not started**
-- Stage 6.5 WPF end-to-end Local ASR verification: **not started**
+- Stage 6.4 persisted selection and source-selection UI: **complete**
+- Stage 6.5 real WPF Local ASR end-to-end verification: **next, not started**
 - Stage 6.6 packaging and installation experience: **not started**
 
-The production Local ASR factory is registered, but normal users still cannot
-select or run it. Stage 6.4 still owns persisted source selection, the selection
-and provisioning-status UI, and user-facing failure presentation. Stage 6.5
-still owns real WPF startup, loopback recognition, translation/history routing,
-switching, and shutdown acceptance with the real worker and models. Stage 6.6
-still owns worker/ONNX Runtime/model distribution or download, installer
-integration, package integrity/release verification, and license/redistribution
-review. Multiple Whisper models, model selection/deletion, CUDA/GPU, microphone
-input, and automatic fallback remain out of scope.
+Stage 6.4 makes Local ASR selectable and configurable but does not establish
+real end-to-end recognition acceptance. Stage 6.5 still owns real WPF startup,
+WASAPI loopback recognition, partial/final display, translation/history routing,
+runtime switching and failure recovery with real native resources, shutdown and
+process cleanup, Windows 10 acceptance, and any required Windows 11 verification.
+Stage 6.6 still owns worker/ONNX Runtime distribution, authoritative Silero and
+Whisper deployment, installer and external model-acquisition experience,
+package integrity/release-asset verification, and redistribution/license review.
+Multiple model sizes, model selection/deletion, file pickers, CUDA/GPU/DirectML,
+microphone input, automatic fallback, background provisioning polling, and
+filesystem watching remain out of scope.
 
 The following ignored files are local Stage 5 development runtime artifacts,
 not repository content or shipped package artifacts:

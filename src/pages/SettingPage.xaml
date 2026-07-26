@@ -10,7 +10,14 @@
     JournalEntry.KeepAlive="False"
     mc:Ignorable="d">
 
+    <ScrollViewer
+        HorizontalScrollBarVisibility="Auto"
+        VerticalScrollBarVisibility="Auto">
     <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
@@ -322,5 +329,96 @@
                     TextWrapping="Wrap" />
             </StackPanel>
         </StackPanel>
+
+        <StackPanel
+            Grid.Row="1"
+            Grid.ColumnSpan="5"
+            Margin="15,15,15,5"
+            Orientation="Vertical">
+            <TextBlock
+                Margin="2.5,0,0,7"
+                FontWeight="SemiBold"
+                Text="Caption Source" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="230" />
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Margin="0,0,15,0">
+                    <TextBlock Margin="2.5,0,0,5" Text="Source" />
+                    <ComboBox
+                        x:Name="CaptionSourceBox"
+                        Width="220"
+                        Height="30"
+                        HorizontalAlignment="Left"
+                        Padding="8,4,8,7"
+                        AutomationProperties.Name="Caption source"
+                        DisplayMemberPath="DisplayName"
+                        SelectionChanged="CaptionSourceBox_SelectionChanged" />
+                    <ProgressBar
+                        x:Name="CaptionSourceProgress"
+                        Width="220"
+                        Height="3"
+                        Margin="0,5,0,0"
+                        HorizontalAlignment="Left"
+                        IsIndeterminate="True"
+                        Visibility="Collapsed" />
+                    <TextBlock
+                        x:Name="CaptionSourceBusyText"
+                        Margin="2.5,3,0,0"
+                        FontSize="10"
+                        Opacity="0.75"
+                        Text="Switching caption source..."
+                        Visibility="Collapsed" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Margin="0,0,15,0">
+                    <TextBlock Margin="2.5,0,0,5" Text="Current Status" />
+                    <TextBlock
+                        x:Name="CaptionSourceActiveStatus"
+                        Width="205"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        x:Name="CaptionSourceFailureStatus"
+                        Width="205"
+                        Margin="0,4,0,0"
+                        Foreground="DarkRed"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="2">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock
+                            Margin="2.5,0,8,5"
+                            VerticalAlignment="Center"
+                            Text="Local ASR Provisioning" />
+                        <ui:Button
+                            x:Name="RefreshLocalAsrProvisioningButton"
+                            Width="30"
+                            Height="25"
+                            Padding="5"
+                            AutomationProperties.Name="Refresh Local ASR provisioning"
+                            Click="RefreshLocalAsrProvisioningButton_Click"
+                            ToolTip="Recheck Local ASR files">
+                            <ui:SymbolIcon Symbol="ArrowSync20" />
+                        </ui:Button>
+                    </StackPanel>
+                    <TextBlock
+                        x:Name="LocalAsrProvisioningStatus"
+                        Width="260"
+                        Text="Not checked"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        x:Name="LocalAsrProvisioningFailure"
+                        Width="260"
+                        Margin="0,4,0,0"
+                        Foreground="DarkRed"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </StackPanel>
     </Grid>
+    </ScrollViewer>
 </Page>

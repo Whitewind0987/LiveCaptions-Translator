@@ -5,6 +5,7 @@ using System.Windows.Input;
 using Wpf.Ui.Appearance;
 
 using LiveCaptionsTranslator.audio.windows;
+using LiveCaptionsTranslator.captioning;
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.utils;
 using Wpf.Ui.Controls;
@@ -15,6 +16,19 @@ namespace LiveCaptionsTranslator
     {
         private static SettingWindow? SettingWindow;
         private bool loadingAudioDevices;
+        private bool captionSourceUiActive;
+        private bool updatingCaptionSourceUi;
+        private bool selectingCaptionSource;
+        private bool refreshingProvisioning;
+        private string? captionSourceTransientFailure;
+        private string? provisioningTransientFailure;
+        private CaptionSourceSettingsSession? captionSourceSession;
+
+        private static readonly CaptionSourceOption[] CaptionSourceOptions =
+        [
+            new(CaptionSourceKind.WindowsLiveCaptions, "Windows Live Captions"),
+            new(CaptionSourceKind.LocalAsr, "Local ASR (offline)")
+        ];
 
         public SettingPage()
         {
@@ -23,6 +37,9 @@ namespace LiveCaptionsTranslator
             DataContext = Translator.Setting;
 
             Loaded += SettingPage_Loaded;
+            Unloaded += SettingPage_Unloaded;
+
+            CaptionSourceBox.ItemsSource = CaptionSourceOptions;
 
             TranslateAPIBox.ItemsSource = Translator.Setting?.Configs.Keys;
             TranslateAPIBox.SelectedIndex = 0;
@@ -32,17 +49,38 @@ namespace LiveCaptionsTranslator
 
         private async void SettingPage_Loaded(object sender, RoutedEventArgs e)
         {
-            try
-            {
-                (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(
-                    maxHeight: (int)App.Current.MainWindow.MinHeight);
-                CheckForFirstUse();
-                await LoadAudioEndpointsAsync();
-            }
-            catch (Exception ex)
-            {
-                ShowAudioEndpointFailure(ex.Message);
-            }
+            captionSourceUiActive = true;
+            selectingCaptionSource = false;
+            refreshingProvisioning = false;
+            captionSourceSession?.Dispose();
+            captionSourceSession = Translator.CreateCaptionSourceSettingsSession();
+            captionSourceSession.StatusChanged += CaptionSourceSession_StatusChanged;
+            ApplyCaptionSourceStatus(captionSourceSession.Status);
+
+            (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(
+                maxHeight: (int)App.Current.MainWindow.MinHeight);
+            CheckForFirstUse();
+
+            await Task.WhenAll(
+                LoadAudioEndpointsWithFailureHandlingAsync(),
+                RefreshLocalAsrProvisioningAsync());
+        }
+
+        private void SettingPage_Unloaded(object sender, RoutedEventArgs e)
+        {
+            captionSourceUiActive = false;
+            if (captionSourceSession == null)
+                return;
+
+            captionSourceSession.StatusChanged -= CaptionSourceSession_StatusChanged;
+            captionSourceSession.Dispose();
+            captionSourceSession = null;
+        }
+
+        private async Task LoadAudioEndpointsWithFailureHandlingAsync()
+        {
+            try { await LoadAudioEndpointsAsync(); }
+            catch (Exception ex) { ShowAudioEndpointFailure(ex.Message); }
         }
 
         private async void RefreshAudioDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -54,6 +92,155 @@ namespace LiveCaptionsTranslator
             catch (Exception ex)
             {
                 ShowAudioEndpointFailure(ex.Message);
+            }
+        }
+
+        private async void CaptionSourceBox_SelectionChanged(
+            object sender,
+            SelectionChangedEventArgs e)
+        {
+            if (updatingCaptionSourceUi ||
+                selectingCaptionSource ||
+                captionSourceSession == null ||
+                CaptionSourceBox.SelectedItem is not CaptionSourceOption selected)
+            {
+                return;
+            }
+
+            var sourceSession = captionSourceSession;
+            selectingCaptionSource = true;
+            CaptionSourceBox.IsEnabled = false;
+            CaptionSourceProgress.Visibility = Visibility.Visible;
+            CaptionSourceBusyText.Visibility = Visibility.Visible;
+            RefreshLocalAsrProvisioningButton.IsEnabled = false;
+            captionSourceTransientFailure = null;
+            try
+            {
+                await sourceSession.SelectAsync(selected.Kind);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Caption-source selection failed: {ex}");
+                if (captionSourceUiActive &&
+                    ReferenceEquals(sourceSession, captionSourceSession))
+                {
+                    captionSourceTransientFailure = "Caption source selection failed.";
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(sourceSession, captionSourceSession))
+                {
+                    selectingCaptionSource = false;
+                    if (captionSourceUiActive)
+                        ApplyCaptionSourceStatus(sourceSession.Status);
+                }
+            }
+        }
+
+        private async void RefreshLocalAsrProvisioningButton_Click(
+            object sender,
+            RoutedEventArgs e) =>
+            await RefreshLocalAsrProvisioningAsync();
+
+        private async Task RefreshLocalAsrProvisioningAsync()
+        {
+            if (captionSourceSession == null || refreshingProvisioning)
+                return;
+
+            var sourceSession = captionSourceSession;
+            refreshingProvisioning = true;
+            RefreshLocalAsrProvisioningButton.IsEnabled = false;
+            provisioningTransientFailure = null;
+            try
+            {
+                await sourceSession.RefreshLocalAsrProvisioningAsync();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Local ASR provisioning refresh failed: {ex}");
+                if (captionSourceUiActive &&
+                    ReferenceEquals(sourceSession, captionSourceSession))
+                {
+                    provisioningTransientFailure = "Local ASR files could not be checked.";
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(sourceSession, captionSourceSession))
+                {
+                    refreshingProvisioning = false;
+                    if (captionSourceUiActive)
+                        ApplyCaptionSourceStatus(sourceSession.Status);
+                }
+            }
+        }
+
+        private void CaptionSourceSession_StatusChanged(
+            object? sender,
+            CaptionSourceApplicationStatus status)
+        {
+            if (sender is not CaptionSourceSettingsSession sourceSession)
+                return;
+
+            _ = Dispatcher.InvokeAsync(() =>
+            {
+                if (captionSourceUiActive &&
+                    ReferenceEquals(sourceSession, captionSourceSession))
+                {
+                    ApplyCaptionSourceStatus(status);
+                }
+            });
+        }
+
+        private void ApplyCaptionSourceStatus(CaptionSourceApplicationStatus status)
+        {
+            updatingCaptionSourceUi = true;
+            try
+            {
+                var selectionBusy = status.IsSelectionInProgress || selectingCaptionSource;
+                CaptionSourceBox.SelectedItem = CaptionSourceOptions.First(option =>
+                    option.Kind == status.PersistedSource);
+                CaptionSourceBox.IsEnabled = !selectionBusy;
+                CaptionSourceProgress.Visibility = selectionBusy
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                CaptionSourceBusyText.Visibility = CaptionSourceProgress.Visibility;
+                RefreshLocalAsrProvisioningButton.IsEnabled =
+                    !selectionBusy && !refreshingProvisioning;
+
+                var active = status.ActiveSource.HasValue
+                    ? CaptionSourceOptions.First(option =>
+                        option.Kind == status.ActiveSource.Value).DisplayName
+                    : "None";
+                CaptionSourceActiveStatus.Text =
+                    $"Active: {active}\nLifecycle: {status.SourceState}";
+                CaptionSourceFailureStatus.Text =
+                    captionSourceTransientFailure ??
+                    status.SourceFailureReason ??
+                    status.PreferencePersistenceFailureReason ??
+                    string.Empty;
+
+                LocalAsrProvisioningStatus.Text = status.LocalAsrProvisioning switch
+                {
+                    LocalAsrProvisioningState.Ready => "Ready",
+                    LocalAsrProvisioningState.Unavailable => "Unavailable",
+                    _ => "Not checked"
+                };
+                LocalAsrProvisioningFailure.Text =
+                    provisioningTransientFailure ??
+                    status.LocalAsrProvisioningFailureReason ??
+                    string.Empty;
+            }
+            finally
+            {
+                updatingCaptionSourceUi = false;
             }
         }
 
@@ -135,6 +322,10 @@ namespace LiveCaptionsTranslator
             string? EndpointId,
             string DisplayName,
             string Diagnostic);
+
+        private sealed record CaptionSourceOption(
+            CaptionSourceKind Kind,
+            string DisplayName);
 
         private async void LiveCaptionsButton_click(object sender, RoutedEventArgs e)
         {

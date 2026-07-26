@@ -21,6 +21,7 @@ namespace LiveCaptionsTranslator
         private static readonly TranslationTaskQueue translationTaskQueue = new();
         private static readonly CaptionSourceCoordinator captionSourceCoordinator;
         private static readonly LocalAsrProvisioning localAsrProvisioning;
+        private static readonly CaptionSourceSelectionController captionSourceSelectionController;
         private static readonly Caption? caption;
         private static readonly Setting? setting;
 
@@ -52,6 +53,14 @@ namespace LiveCaptionsTranslator
             captionSourceCoordinator = new CaptionSourceCoordinator(
                 () => new WindowsLiveCaptionsSource(),
                 localAsrProvisioning.CreateSource);
+            captionSourceSelectionController = new CaptionSourceSelectionController(
+                setting!,
+                captionSourceCoordinator.SelectAsync,
+                localAsrProvisioning.Validate,
+                () => captionSourceCoordinator.CurrentSource,
+                () => captionSourceCoordinator.State,
+                () => captionSourceCoordinator.FailureReason,
+                new CaptionSourceUiFailureSanitizer(localAsrProvisioning.Layout));
             captionSourceCoordinator.StatusChanged += OnCaptionSourceStatusChanged;
         }
 
@@ -60,12 +69,18 @@ namespace LiveCaptionsTranslator
 
         public static Task<CaptionSourceStartResult> StartCaptionSourceAsync(
             CancellationToken cancellationToken = default) =>
-            captionSourceCoordinator.StartAsync(cancellationToken);
+            captionSourceSelectionController.StartConfiguredAsync(cancellationToken);
 
-        public static Task<CaptionSourceStartResult> SelectCaptionSourceAsync(
+        public static Task<CaptionSourceSelectionResult> SelectCaptionSourceAsync(
             CaptionSourceKind source,
             CancellationToken cancellationToken = default) =>
-            captionSourceCoordinator.SelectAsync(source, cancellationToken);
+            captionSourceSelectionController.SelectAsync(source, cancellationToken);
+
+        public static CaptionSourceApplicationStatus CaptionSourceApplicationStatus =>
+            captionSourceSelectionController.Status;
+
+        public static CaptionSourceSettingsSession CreateCaptionSourceSettingsSession() =>
+            new(captionSourceSelectionController);
 
         public static Task StopCaptionSourceAsync(CancellationToken cancellationToken = default) =>
             captionSourceCoordinator.StopAsync(cancellationToken);
@@ -233,6 +248,7 @@ namespace LiveCaptionsTranslator
 
         private static void OnCaptionSourceStatusChanged(object? sender, CaptionSourceStatus status)
         {
+            captionSourceSelectionController.NotifySourceStatusChanged();
             switch (status.State)
             {
                 case CaptionSourceState.Running:

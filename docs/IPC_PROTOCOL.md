@@ -262,7 +262,7 @@ Stage 4 remains the transport/process infrastructure. Stage 5 is CPU-only and
 uses explicit local model/runtime paths. Stage 6.1 provides the production
 `ICaptionSource` adapter, Stage 6.2 provides application source ownership, and
 Stage 6.3 registers a lazy production Local ASR factory with fixed runtime/model
-provisioning. That work does not change protocol 1.0 or start Local ASR during
-ordinary default Windows startup. Settings persistence/UI, model management,
-installer packaging, WPF end-to-end Local ASR verification, CUDA, microphone
-input, and automatic fallback remain future work.
+provisioning. Stage 6.4 adds persisted source selection and its settings UI
+without changing protocol 1.0. Real WPF Local ASR end-to-end verification,
+model management, installer packaging, CUDA, microphone input, and automatic
+fallback remain future work.

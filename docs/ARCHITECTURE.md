@@ -12,8 +12,9 @@ adds an explicitly configured CPU recognition build while preserving the
 model-free transport-only worker. Stage 6.1 integrates that pipeline behind a
 production `ICaptionSource`, Stage 6.2 adds application-level caption-source
 ownership and selection, and Stage 6.3 adds the fixed runtime/model layout,
-validation, and production Local ASR factory. User-facing source selection and
-packaging remain later Stage 6 work.
+validation, and production Local ASR factory. Stage 6.4 adds the persisted
+caption-source preference and the user-facing settings workflow. Real WPF
+Local ASR end-to-end acceptance and packaging remain later Stage 6 work.
 
 ## Objective
 
@@ -394,9 +395,8 @@ failure keeps the coordinator Faulted and is propagated through Dispose.
 `Translator` reads source state and snapshots through the coordinator.
 
 Selecting Local ASR is architecturally supported. Stage 6.3 supplies the
-production factory described below, but no UI or persisted setting exposes that
-selection yet. This remains architectural availability rather than user-facing
-Local ASR support.
+production factory described below, and Stage 6.4 supplies the persisted
+preference and user-facing selection workflow described after it.
 
 ## Stage 6.3 fixed runtime/model provisioning
 
@@ -415,10 +415,11 @@ Translator
 -> LiveCaptionsAsrWorker.exe
 ```
 
-Windows Live Captions remains the default source. `Translator` registers a real
-Local ASR factory, but registration and ordinary Windows startup do not inspect
-Local ASR assets. Validation runs only when provisioning is explicitly queried
-or Local ASR is selected. Each successful factory call creates a fresh source;
+Windows Live Captions remains the safe default for new, older, or invalid
+configurations. `Translator` registers a real Local ASR factory, but
+registration and Windows-configured startup do not inspect Local ASR assets.
+Validation runs only when provisioning is explicitly queried or Local ASR is
+selected. Each successful factory call creates a fresh source;
 when that source enters `StartAsync`, its lazy pipeline factory creates a fresh
 capture service, supervisor, and pipeline ownership graph. Source construction
 does not start capture, create named pipes, launch the worker, or load models.
@@ -462,6 +463,118 @@ the fixed Silero and multilingual `ggml-tiny.bin` paths, language `auto`, and
 `WorkerRecognitionConfiguration.DefaultThreadCount`. Stage 6.3 adds no CUDA,
 GPU, microphone input, automatic fallback, or IPC field. The build does not yet
 copy or package any runtime or model asset.
+
+## Stage 6.4 persisted selection and settings UI
+
+Stage 6.4 is complete. The existing `setting.json` now stores one stable string
+field, using exactly one of these forms:
+
+```json
+"CaptionSource": "WindowsLiveCaptions"
+```
+
+```json
+"CaptionSource": "LocalAsr"
+```
+
+Enum ordinals and display labels are never persisted. New and older
+configurations default to `WindowsLiveCaptions`. A missing, null, empty,
+whitespace, malformed, numeric, unknown, differently cased, or otherwise
+unsupported value safely normalizes to `WindowsLiveCaptions`; persisted values
+are not interpreted case-insensitively. Loading and migration finish before
+autosave is enabled. The application continues to use the existing single
+`setting.json` file and its existing save location.
+
+Startup now follows the persisted selection directly:
+
+```text
+App.OnStartup
+-> Translator.StartCaptionSourceAsync
+-> CaptionSourceSelectionController.StartConfiguredAsync
+-> CaptionSourceCoordinator.SelectAsync(persisted source)
+```
+
+There is no Windows-then-Local double transition. Windows-configured startup
+does not query Local ASR provisioning. LocalAsr-configured startup selects Local
+ASR directly, with validation remaining lazy inside the Stage 6.3 production
+factory. Missing assets therefore start no capture, worker, or named pipe.
+Startup failure does not rewrite the preference and does not trigger automatic
+fallback. Existing background-loop and application-shutdown behavior is
+unchanged.
+
+Runtime source selection is one serialized transaction. Local ASR selection
+first performs a fresh Stage 6.3 provisioning validation. When invalid, it does
+not call the coordinator, keeps the current source and persisted preference,
+exposes the safe aggregated failure, and allows an explicit refresh followed by
+retry. Windows Live Captions selection does not query Local ASR provisioning;
+it calls the coordinator directly and persists Windows only after successful
+selection. For either source, overlapping UI operations are disabled,
+selection failure or cancellation does not persist the requested source, and
+no automatic fallback or hidden restoration occurs. The coordinator retains
+its existing old-source-stop/new-source-start ordering.
+
+Source activation and preference persistence are separate outcomes. If a
+source switch succeeds but saving `setting.json` fails, the new source remains
+active while the in-memory persisted preference is restored to the last
+successfully saved value. The UI may therefore show different active and
+persisted sources. The result records successful source selection, failed
+preference persistence, and an overall incomplete operation. It triggers no
+fallback and no second coordinator selection; a later retry may attempt the
+persist operation again. The UI shows a concise generic persistence failure,
+not raw filesystem exception details. Stage 6.4 did not redesign the existing
+settings writer or introduce atomic temporary-file replacement.
+
+The settings surface receives an immutable application-facing status containing
+the persisted source, active source, lifecycle state, selection-in-progress
+state, Local ASR provisioning state (`Not checked`, `Ready`, or `Unavailable`),
+source failure, preference-persistence failure, and provisioning failure.
+Source status notifications update the currently open settings session, and a
+disposed session unsubscribes. Queued callbacks retain their session identity,
+so callbacks from an unloaded session cannot update a newly loaded session.
+
+UI-facing source, selection, and provisioning failures do not expose
+developer-machine absolute paths. Known production paths are normalized to:
+
+```text
+asr\LiveCaptionsAsrWorker.exe
+asr\onnxruntime.dll
+asr\silero_vad_16k_op15.onnx
+asr\ggml-tiny.bin
+```
+
+Other drive-rooted and UNC-rooted absolute paths are hidden. Raw coordinator
+and worker diagnostics remain available internally. Sanitization performs no
+filesystem access, does not rerun provisioning, and never displays Stage 6.3
+`ExpectedPath` values directly.
+
+The existing `SettingPage` now includes a caption-source section with a
+Windows Live Captions / Local ASR (offline) selector, active source and
+lifecycle status, inline source and persistence failures, Local ASR
+provisioning state and inline failure, explicit refresh, and a visible busy
+state that disables duplicate actions. Opening the page explicitly checks
+provisioning. Refresh only revalidates; it does not switch sources or start
+Local ASR. There is no polling, filesystem watcher, runtime/model download, or
+repair. Routine missing files are shown inline rather than in a modal dialog,
+and asynchronous operations do not synchronously block the UI thread.
+
+Supported recovery is explicit:
+
+- If Local ASR assets are missing while Windows is active, Local selection is
+  rejected before coordinator selection. Windows stays active and persisted;
+  after files are supplied externally, refresh can report `Ready` and the user
+  can retry Local ASR selection.
+- If persisted LocalAsr is unavailable at startup, LocalAsr stays persisted,
+  the failure appears in settings, and there is no automatic Windows fallback.
+  The user may select Windows, which is persisted only after successful
+  selection.
+- A runtime Local ASR failure leaves LocalAsr persisted and displays the actual
+  lifecycle failure without automatic fallback.
+- A preference-save failure may leave active and persisted sources different;
+  the failure remains visible and retry can persist without fallback.
+
+Stage 6.4 makes Local ASR selectable and configurable, but it does not establish
+real WPF end-to-end recognition acceptance or distributable packaging. Those
+remain Stage 6.5 and Stage 6.6 work respectively.
 
 ## Caption event lifecycle
 

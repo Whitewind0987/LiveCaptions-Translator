@@ -9,8 +9,10 @@ WASAPI loopback capture, normalization, framing, and bounded-buffer foundation.
 Stage 4 implements the separately built native worker-process boundary,
 versioned named-pipe IPC, supervision, and normalized-audio transport. Stage 5
 adds an explicitly configured CPU recognition build while preserving the
-model-free transport-only worker. Production caption-source integration remains
-future Stage 6 work.
+model-free transport-only worker. Stage 6.1 integrates that pipeline behind a
+production `ICaptionSource`, and Stage 6.2 adds application-level caption-source
+ownership and selection. Runtime/model provisioning and user-facing Local ASR
+selection remain later Stage 6 work.
 
 ## Objective
 
@@ -334,7 +336,65 @@ Caption delivery is not disabled before accepted publications drain. A
 reentrant `StopAsync` from inside a caption subscriber invalidates immediately
 and does not wait for itself. Abnormal cleanup invalidates immediately. The
 zero-count check and delivery invalidation are atomic, fixing the final TOCTOU
-race. Stage 6 has not begun.
+race.
+
+## Stage 6.1 production Local ASR caption source
+
+Stage 6.1 is complete and committed. It adds the production boundary:
+
+```text
+ICaptionSource
+-> LocalAsrCaptionSource
+-> ILocalAsrPipeline
+-> AudioWorkerPipelineCaptionAdapter
+-> AudioWorkerPipeline
+```
+
+`LocalAsrCaptionSource` validates Stage 5 events and exposes only stable caption
+output. Reset is validated and forwarded; Partial is validated but suppressed;
+Committed is normalized to Final; and the matching Stage 5 Final is
+deduplicated. Native Final-only output is forwarded. Stable identity is bounded
+to the most recent `SessionId + SegmentId + Revision`, while consecutive
+segments remain valid through the downstream `CaptionSourceHost` gate.
+
+Lifecycle ownership supports idempotent and concurrent Start, Stop before
+Start, repeated Stop, restart with a fresh run identity, and stale old-run event
+rejection. Normal Stop preserves accepted caption drain. External Stop waits
+for publication cleanup, while callback-reentrant Stop invalidates immediately
+without waiting on its own callback. Subscriber exceptions are isolated and
+disposal is idempotent. Stage 6.1 changed no Stage 5 pipeline internals.
+
+## Stage 6.2 application caption-source coordination
+
+Stage 6.2 implementation and final review are complete but currently
+uncommitted. The current ownership chain is:
+
+```text
+App
+-> Translator
+-> CaptionSourceCoordinator
+-> fresh CaptionSourceHost
+-> selected ICaptionSource
+```
+
+`CaptionSourceKind` has stable `WindowsLiveCaptions` and `LocalAsr` identities;
+Windows Live Captions remains the production default. Source construction uses
+injected factories. Every real switch creates a fresh `CaptionSourceHost`, and
+selecting the active kind is idempotent. The old host is stopped and disposed
+before the new source starts, so source lifetimes never overlap.
+
+The coordinator rejects stale notifications using both owner identity and
+notification version. A failed or cancelled target creation/start is cleaned
+up. Stop and Dispose are serialized and idempotent, callback-reentrant shutdown
+does not deadlock, and cancellation callbacks execute outside the state lock.
+Ownership of unpublished and published targets is explicit. A pending Stop
+failure keeps the coordinator Faulted and is propagated through Dispose.
+`CaptionSourceHost` remains the only `CaptionEventGate` boundary, and
+`Translator` reads source state and snapshots through the coordinator.
+
+Selecting Local ASR is architecturally supported, but normal application
+startup does not yet supply a production Local ASR factory. Fixed runtime/model
+provisioning must be completed first; this is not user-facing Local ASR support.
 
 ## Caption event lifecycle
 
@@ -412,11 +472,13 @@ event is `Reset` sequence 1.
 
 ## Stage 2B Windows Live Captions adapter
 
-The production flow is:
+Stage 2B originally established the Windows-specific portion of the production
+flow. Under the current Stage 6.2 coordinator, the default path is:
 
 ```text
 App lifecycle
 -> Translator caption-source lifecycle
+-> CaptionSourceCoordinator
 -> CaptionSourceHost
 -> ICaptionSource
 -> WindowsLiveCaptionsSource
@@ -425,14 +487,14 @@ App lifecycle
 -> LiveCaptionsHandler
 ```
 
-`Translator` constructs exactly one `WindowsLiveCaptionsSource` without native
-side effects. `App` explicitly starts the source before starting the three
-Translator loops, and cancels the loops, stops the source, and disposes its
-runtime during application exit. Shutdown observes every loop and independently
-attempts source stop and disposal even when loop cancellation, a managed loop,
-or an earlier cleanup phase fails. Phase-specific failures are retained for
-diagnostics, while `OnExit` and `ProcessExit` share the same idempotent shutdown
-operation.
+`Translator` constructs the coordinator with an injected Windows Live Captions
+factory, without native side effects. `App` explicitly starts the default
+source before starting the three Translator loops, and cancels the loops, stops
+the coordinator, and disposes its runtime during application exit. Shutdown
+observes every loop and independently attempts source stop and disposal even
+when loop cancellation, a managed loop, or an earlier cleanup phase fails.
+Phase-specific failures are retained for diagnostics, while `OnExit` and
+`ProcessExit` share the same idempotent shutdown operation.
 
 `CaptionSourceHost` subscribes before startup, passes every event through
 `CaptionEventGate`, and stores only one lock-protected latest accepted full-

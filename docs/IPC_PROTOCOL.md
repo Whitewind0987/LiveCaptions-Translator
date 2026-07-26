@@ -144,8 +144,10 @@ The payload maps without semantic changes to the Stage 2 model:
 
 The C# codec constructs the existing validated `CaptionEvent`. Stage 5 accepts
 it only as unsolicited control traffic with an empty correlation ID and exposes
-it through transport/pipeline notifications. It is not wired to
-`CaptionSourceHost` or `Translator`.
+it through transport/pipeline notifications. Stage 6.1 consumes those
+notifications through `LocalAsrCaptionSource`; Stage 6.2 makes source ownership
+selectable through `CaptionSourceCoordinator` while retaining
+`CaptionSourceHost` as the only event-gate boundary.
 
 ## Normalized audio frame
 
@@ -256,9 +258,10 @@ caption encoding, `AudioStreamEnd`, and the exact 700-byte audio frame.
 
 ## Stage 4/5 limitations
 
-Stage 4 is developer-probe and future-coordinator infrastructure. Ordinary WPF
-startup does not construct the supervisor, start capture, or launch the worker.
-No packaging resolver or model manager is integrated. Stage 5 is CPU-only and
-uses explicit local model/runtime paths. CUDA, production `ICaptionSource`
-integration, translation/UI/history routing, automatic downloads and ordinary
-application startup integration remain future work.
+Stage 4 remains the transport/process infrastructure. Stage 5 is CPU-only and
+uses explicit local model/runtime paths. Stage 6.1 provides the production
+`ICaptionSource` adapter and Stage 6.2 provides application source ownership,
+but ordinary WPF startup still has no production Local ASR factory. Runtime and
+model provisioning, settings persistence/UI, model management, installer
+packaging, WPF end-to-end Local ASR verification, CUDA, microphone input, and
+automatic fallback remain future work.

@@ -2,7 +2,8 @@
 
 ## Repository state
 
-- Branch: `feature/vad-whisper-worker`
+- Branch: `feature/local-asr-integration`
+- Current committed HEAD: `d433820ec1ecb6d89bd69a330320ac9b940d0150`
 - Stage 3 starting commit: `ce36855781824597de3e7a8e2901345967f9bd82`
 - Stage 4 starting commit: `04e4f2c95ac98a8c32dbb7ae34b1a679a52835ad`
 - Upstream repository: `SakiRinn/LiveCaptions-Translator`
@@ -15,16 +16,16 @@
     Windows 10 core real-audio acceptance
   - Stage 4 native worker-process, versioned IPC, and normalized-audio transport
     foundation implementation and automated cross-process validation
-- Current status: Stage 5 CPU recognition implementation is present on the
-  working branch. Deterministic managed/native tests, the real-model silence
-  fixture, and the real-model known-speech cross-process fixture passed on
-  Windows 10. Final acceptance is pending full rebuild/test after the last
-  dispatcher, cancellation, diagnostics and post-roll edits plus real-WASAPI
-  and recognition Ctrl+C runs. NuGet TLS failure and the execution environment's
-  exhausted elevated-command allowance blocked that rerun. Stage 5 is therefore
-  not marked complete.
-- Next stage: finish the remaining Stage 5 acceptance only. Stage 6 has not
-  begun and requires explicit approval after Stage 5 acceptance.
+  - Stage 5 CPU recognition pipeline implementation and Windows 10 acceptance
+  - Stage 6.1 production Local ASR `ICaptionSource` adapter, committed at the
+    current HEAD
+- Current status: Stage 6.2 application caption-source ownership and selection
+  lifecycle implementation and final review are complete but uncommitted. The
+  working tree contains only its expected source/test changes plus the
+  documentation-only status update.
+- Next stage: Stage 6.3 fixed-model/runtime provisioning, only after explicit
+  approval. Stage 6.4 settings UI, Stage 6.5 WPF end-to-end Local ASR
+  verification, and Stage 6.6 packaging/installation have not started.
 
 ## Environment
 
@@ -105,8 +106,10 @@ The following root-level runtime files are ignored and were not committed:
 
 ### Known remaining Windows 10 incompatibility
 
-Windows 10 still has no real-time caption source. The application shows a
-warning and idles. A future stage will add local speech recognition.
+Normal Windows 10 application startup still has no configured real-time caption
+source. The application shows a warning and idles. The Local ASR source now
+exists, but production runtime/model provisioning and its application factory
+remain Stage 6.3 work.
 
 ## Stage 2A implementation
 
@@ -331,8 +334,9 @@ The worker owns stateful 512-sample Silero windows over existing 320-sample
 frames, bounded speech segments, one serialized Whisper inference thread,
 latest-wins Partial work, mandatory Final work, generation-based stale-result
 rejection, gap Reset behavior, and Reset/Partial/Committed/Final wire events.
-Transport and pipeline expose guarded notifications for future Stage 6 without
-routing anything into the application. Ordinary WPF startup remains unchanged.
+Transport and pipeline expose guarded notifications consumed by the Stage 6.1
+Local ASR adapter. Ordinary WPF startup still has no production Local ASR
+factory and therefore does not start this path.
 
 ### Managed validation
 
@@ -456,7 +460,100 @@ lifecycle, deterministic WAV, cancellation, cleanup and ownership validation
 are complete. A strict zero-drop real-WASAPI normal-stop confirmation on the
 exact final ordering revision remains pending. The prior 517/517 strict run
 remains recorded as evidence from the immediately preceding lifecycle revision.
-Windows 11 remains pending. Stage 6 has not begun. Recognition remains
-developer-probe/worker functionality and is not yet the production
-`ICaptionSource`.
+Windows 11 remains pending. Stage 5 is complete; its recognition pipeline is
+now available through the Stage 6.1 production `ICaptionSource` boundary, but
+normal application Local ASR startup remains unavailable until provisioning is
+implemented.
+
+## Stage 6.1 production Local ASR source
+
+Stage 6.1 is complete and committed. The production boundary is:
+
+```text
+ICaptionSource
+-> LocalAsrCaptionSource
+-> ILocalAsrPipeline
+-> AudioWorkerPipelineCaptionAdapter
+-> AudioWorkerPipeline
+```
+
+The adapter validates and forwards Reset, validates but suppresses Partial,
+normalizes Committed to Final, deduplicates the matching Stage 5 Final, and
+forwards native Final-only output. Its stable identity cache is bounded to the
+most recent `SessionId + SegmentId + Revision`; consecutive segments remain
+valid at the single downstream `CaptionSourceHost` gate.
+
+Start is idempotent under concurrent callers; Stop is safe before Start and
+when repeated. Restart creates a fresh run identity, stale old-run events are
+rejected, normal Stop preserves caption drain, callback-reentrant Stop avoids
+self-wait while external Stop joins cleanup, subscriber exceptions are
+isolated, and disposal is idempotent. No Stage 5 internals changed.
+
+Validation recorded for Stage 6.1:
+
+- focused `LocalAsrCaptionSource` tests: 28 passed;
+- complete managed suite: 340 passed, 0 failed, 0 skipped;
+- main project, `AudioCaptureProbe`, and `AsrWorkerProbe` builds: passed.
+
+## Stage 6.2 application ownership and selection
+
+Stage 6.2 implementation and final review are complete but currently
+uncommitted. The ownership chain is:
+
+```text
+App
+-> Translator
+-> CaptionSourceCoordinator
+-> fresh CaptionSourceHost
+-> selected ICaptionSource
+```
+
+`CaptionSourceKind.WindowsLiveCaptions` and `CaptionSourceKind.LocalAsr` are the
+selection identities; Windows Live Captions remains the production default.
+Injected factories create sources, each real switch creates a fresh Host, and
+reselecting the active source is idempotent. The old source is stopped and
+disposed before the new one starts, so lifetimes never overlap. Owner identity
+and notification version reject stale callbacks. Failed or cancelled target
+creation/start is cleaned, with explicit ownership for both unpublished and
+published targets.
+
+Stop and Dispose are serialized and idempotent. Callback-reentrant shutdown
+avoids deadlock, cancellation callbacks run outside the coordinator state lock,
+and a pending Stop failure remains Faulted and propagates through Dispose.
+`CaptionSourceHost` remains the sole `CaptionEventGate` boundary. `Translator`
+now obtains state, native-window capability, and snapshots through the
+coordinator.
+
+Validation recorded for Stage 6.2:
+
+- focused `CaptionSourceCoordinator` tests: 20 passed;
+- complete managed suite: 360 passed, 0 failed, 0 skipped;
+- main project, `AudioCaptureProbe`, and `AsrWorkerProbe` builds: passed;
+- `git diff --check`: passed;
+- new code warnings: none; existing offline `NU1900` warnings are
+  environmental.
+
+## Stage 6 roadmap and limitations
+
+- Stage 5 recognition pipeline: **complete**
+- Stage 6.1 production `ICaptionSource` adapter: **complete**
+- Stage 6.2 application source ownership and selection lifecycle: **complete,
+  currently uncommitted**
+- Stage 6.3 fixed-model/runtime provisioning: **next, not started**
+- Stage 6.4 settings persistence and UI: **not started**
+- Stage 6.5 WPF end-to-end Local ASR verification: **not started**
+- Stage 6.6 packaging and installation experience: **not started**
+
+Normal users cannot select or run Local ASR yet. Intentionally incomplete work
+includes the production Local ASR factory, fixed model location and validation,
+worker/runtime binary provisioning, settings persistence and UI, model
+download/delete/selection, installer packaging, real WPF end-to-end Local ASR
+execution, GPU/CUDA, microphone input, and automatic fallback.
+
+The following ignored files are local Stage 5 development runtime artifacts,
+not repository content or shipped package artifacts:
+
+- `asr/LiveCaptionsAsrWorker.exe`
+- `asr/onnxruntime.dll`
+- `asr/silero_vad.onnx`
 

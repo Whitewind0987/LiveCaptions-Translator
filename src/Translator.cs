@@ -18,7 +18,7 @@ namespace LiveCaptionsTranslator
 
         private static readonly ConcurrentQueue<string> pendingTextQueue = new();
         private static readonly TranslationTaskQueue translationTaskQueue = new();
-        private static readonly CaptionSourceHost captionSourceHost;
+        private static readonly CaptionSourceCoordinator captionSourceCoordinator;
         private static readonly Caption? caption;
         private static readonly Setting? setting;
 
@@ -27,14 +27,14 @@ namespace LiveCaptionsTranslator
 
         public static bool LogOnlyFlag { get; set; }
         public static bool FirstUseFlag { get; set; }
-        public static CaptionSourceState CaptionSourceState => captionSourceHost.State;
+        public static CaptionSourceState CaptionSourceState => captionSourceCoordinator.State;
         public static bool CaptionSourceUnavailable =>
             CaptionSourceState is CaptionSourceState.Unavailable or CaptionSourceState.Faulted;
-        public static string? CaptionSourceFailureReason => captionSourceHost.FailureReason;
+        public static string? CaptionSourceFailureReason => captionSourceCoordinator.FailureReason;
         public static bool IsCaptionWindowAvailable =>
-            captionSourceHost.NativeWindowControl?.IsWindowAvailable == true;
+            captionSourceCoordinator.NativeWindowControl?.IsWindowAvailable == true;
         public static bool? IsCaptionWindowVisible =>
-            captionSourceHost.NativeWindowControl?.IsWindowVisible;
+            captionSourceCoordinator.NativeWindowControl?.IsWindowVisible;
 
         public static event Action? TranslationLogged;
 
@@ -46,30 +46,35 @@ namespace LiveCaptionsTranslator
             caption = models.Caption.GetInstance();
             setting = models.Setting.Load();
 
-            var source = new WindowsLiveCaptionsSource();
-            captionSourceHost = new CaptionSourceHost(source);
-            captionSourceHost.StatusChanged += OnCaptionSourceStatusChanged;
+            captionSourceCoordinator = new CaptionSourceCoordinator(
+                () => new WindowsLiveCaptionsSource());
+            captionSourceCoordinator.StatusChanged += OnCaptionSourceStatusChanged;
         }
 
         public static Task<CaptionSourceStartResult> StartCaptionSourceAsync(
             CancellationToken cancellationToken = default) =>
-            captionSourceHost.StartAsync(cancellationToken);
+            captionSourceCoordinator.StartAsync(cancellationToken);
+
+        public static Task<CaptionSourceStartResult> SelectCaptionSourceAsync(
+            CaptionSourceKind source,
+            CancellationToken cancellationToken = default) =>
+            captionSourceCoordinator.SelectAsync(source, cancellationToken);
 
         public static Task StopCaptionSourceAsync(CancellationToken cancellationToken = default) =>
-            captionSourceHost.StopAsync(cancellationToken);
+            captionSourceCoordinator.StopAsync(cancellationToken);
 
-        public static ValueTask DisposeCaptionSourceAsync() => captionSourceHost.DisposeAsync();
+        public static ValueTask DisposeCaptionSourceAsync() => captionSourceCoordinator.DisposeAsync();
 
         public static Task<CaptionWindowControlResult> ShowCaptionWindowAsync(
             CancellationToken cancellationToken = default) =>
-            captionSourceHost.NativeWindowControl?.ShowAsync(cancellationToken) ??
+            captionSourceCoordinator.NativeWindowControl?.ShowAsync(cancellationToken) ??
             Task.FromResult(CaptionWindowControlResult.Failed(
                 CaptionWindowControlFailure.Unavailable,
                 "The active caption source does not provide a native window."));
 
         public static Task<CaptionWindowControlResult> HideCaptionWindowAsync(
             CancellationToken cancellationToken = default) =>
-            captionSourceHost.NativeWindowControl?.HideAsync(cancellationToken) ??
+            captionSourceCoordinator.NativeWindowControl?.HideAsync(cancellationToken) ??
             Task.FromResult(CaptionWindowControlResult.Failed(
                 CaptionWindowControlFailure.Unavailable,
                 "The active caption source does not provide a native window."));
@@ -89,7 +94,7 @@ namespace LiveCaptionsTranslator
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                var sourceState = captionSourceHost.ReadLatestState();
+                var sourceState = captionSourceCoordinator.ReadLatestState();
                 var result = processor.Tick(
                     sourceState.SessionGeneration,
                     sourceState.Snapshot?.Text,

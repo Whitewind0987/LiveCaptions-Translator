@@ -844,7 +844,49 @@ lifecycle, deterministic WAV, cancellation, cleanup and ownership validation
 are complete. A strict zero-drop real-WASAPI normal-stop confirmation on the
 exact final ordering revision remains pending. The prior 517/517 strict run
 remains recorded as evidence from the immediately preceding lifecycle revision.
-Windows 11 remains pending. Stage 6 has not begun. Recognition remains
-developer-probe/worker functionality and is not yet the production
-`ICaptionSource`.
+Windows 11 remains pending. Stage 5 is complete. Stage 6.1 and Stage 6.2
+managed integration validation is recorded below; it does not constitute
+user-facing or WPF end-to-end Local ASR acceptance.
+
+## Stage 6.1 production Local ASR source validation
+
+Stage 6.1 is complete and committed. Focused deterministic
+`LocalAsrCaptionSource` tests passed **28 passed, 0 failed, 0 skipped**. They
+cover event normalization and deduplication, bounded stable identity,
+consecutive segments, concurrent/idempotent Start, Stop before Start and
+repeated Stop, fresh restart identity, stale-run rejection, normal-stop drain,
+external and callback-reentrant Stop, subscriber isolation, and idempotent
+disposal.
+
+The complete managed suite after Stage 6.1 passed **340 passed, 0 failed, 0
+skipped**. The main project, `AudioCaptureProbe`, and `AsrWorkerProbe` builds
+passed. No Stage 5 internal production file was changed.
+
+## Stage 6.2 caption-source coordinator validation
+
+Stage 6.2 implementation and final review are complete but currently
+uncommitted. Focused deterministic `CaptionSourceCoordinator` tests passed
+**20 passed, 0 failed, 0 skipped**. Coverage includes default selection,
+idempotent reselection, fresh Host ownership, ordered non-overlapping switches,
+stale callback rejection, failed/cancelled target cleanup, serialized Stop and
+Dispose, callback-reentrant shutdown, cancellation outside the state lock,
+unpublished/published target ownership, pending Stop-failure propagation, and
+the single Host/Gate boundary.
+
+Latest validation result:
+
+- complete managed suite: **360 passed, 0 failed, 0 skipped**;
+- main project build: **passed**;
+- `AudioCaptureProbe` build: **passed**;
+- `AsrWorkerProbe` build: **passed**;
+- `git diff --check`: **passed**;
+- new code warnings: **none**;
+- existing offline `NU1900` warnings: environmental and unchanged.
+
+These tests use injected fake sources and factories. They do not provide a
+production Local ASR factory, provision worker/runtime/model files, expose a
+settings choice, or run Local ASR end to end through the WPF application.
+Stage 6.3 provisioning, Stage 6.4 settings UI, Stage 6.5 WPF end-to-end
+verification, and Stage 6.6 packaging remain untested and not started. All
+Windows 11 Local ASR checks remain pending.
 

@@ -10,9 +10,10 @@ Stage 4 implements the separately built native worker-process boundary,
 versioned named-pipe IPC, supervision, and normalized-audio transport. Stage 5
 adds an explicitly configured CPU recognition build while preserving the
 model-free transport-only worker. Stage 6.1 integrates that pipeline behind a
-production `ICaptionSource`, and Stage 6.2 adds application-level caption-source
-ownership and selection. Runtime/model provisioning and user-facing Local ASR
-selection remain later Stage 6 work.
+production `ICaptionSource`, Stage 6.2 adds application-level caption-source
+ownership and selection, and Stage 6.3 adds the fixed runtime/model layout,
+validation, and production Local ASR factory. User-facing source selection and
+packaging remain later Stage 6 work.
 
 ## Objective
 
@@ -392,9 +393,75 @@ failure keeps the coordinator Faulted and is propagated through Dispose.
 `CaptionSourceHost` remains the only `CaptionEventGate` boundary, and
 `Translator` reads source state and snapshots through the coordinator.
 
-Selecting Local ASR is architecturally supported, but normal application
-startup does not yet supply a production Local ASR factory. Fixed runtime/model
-provisioning must be completed first; this is not user-facing Local ASR support.
+Selecting Local ASR is architecturally supported. Stage 6.3 supplies the
+production factory described below, but no UI or persisted setting exposes that
+selection yet. This remains architectural availability rather than user-facing
+Local ASR support.
+
+## Stage 6.3 fixed runtime/model provisioning
+
+Stage 6.3 is complete. The production composition is:
+
+```text
+Translator
+-> CaptionSourceCoordinator
+-> LocalAsrProvisioning.CreateSource
+-> LocalAsrCaptionSource
+-> AudioWorkerPipelineCaptionAdapter
+-> AudioWorkerPipeline
+-> AudioCaptureService
+-> AsrWorkerSupervisor
+-> WorkerProcessLauncher
+-> LiveCaptionsAsrWorker.exe
+```
+
+Windows Live Captions remains the default source. `Translator` registers a real
+Local ASR factory, but registration and ordinary Windows startup do not inspect
+Local ASR assets. Validation runs only when provisioning is explicitly queried
+or Local ASR is selected. Each successful factory call creates a fresh source;
+when that source enters `StartAsync`, its lazy pipeline factory creates a fresh
+capture service, supervisor, and pipeline ownership graph. Source construction
+does not start capture, create named pipes, launch the worker, or load models.
+Those native side effects remain owned by the existing `StartAsync` lifecycle.
+Selection failure is reported without automatic fallback.
+
+The fixed production root is `AppContext.BaseDirectory\asr`. Only these
+application-relative paths are accepted:
+
+```text
+asr\LiveCaptionsAsrWorker.exe
+asr\onnxruntime.dll
+asr\silero_vad_16k_op15.onnx
+asr\ggml-tiny.bin
+```
+
+Paths are canonical absolute paths derived from `AppContext.BaseDirectory`,
+not the process current directory. Arbitrary searches, fallback filenames, and
+dual-name probing are not supported, and the process-wide current directory is
+never changed. `WorkerProcessLauncher` instead sets the child
+`WorkingDirectory` to the worker executable's directory so side-by-side native
+dependencies resolve there.
+
+Provisioning inspects all four fixed assets and returns one immutable result
+that aggregates every failure. Each asset must resolve inside the fixed ASR
+root, exist, be a file, and be non-empty. Additional pinned checks are:
+
+| Asset | Expected length | Expected SHA-256 |
+|---|---:|---|
+| `silero_vad_16k_op15.onnx` | 1,289,603 bytes | `7ED98DDBAD84CCAC4CD0AEB3099049280713DF825C610A8ED34543318F1B2C49` |
+| `ggml-tiny.bin` | 77,691,713 bytes | `BE07E048E1E599AD46341C8D2A135645097A538221678B7ACDD1B1919C6E1B21` |
+| `onnxruntime.dll` | 14,107,168 bytes | No repository-authoritative hash |
+| `LiveCaptionsAsrWorker.exe` | Non-empty | No repository-authoritative fixed size or hash |
+
+Validation does not create, modify, repair, copy, download, or delete assets,
+and it does not retain file handles. Failure text uses stable `asr\...`
+relative paths and does not expose developer-machine absolute paths.
+
+The production pipeline uses the existing Stage 5 CPU recognition path with
+the fixed Silero and multilingual `ggml-tiny.bin` paths, language `auto`, and
+`WorkerRecognitionConfiguration.DefaultThreadCount`. Stage 6.3 adds no CUDA,
+GPU, microphone input, automatic fallback, or IPC field. The build does not yet
+copy or package any runtime or model asset.
 
 ## Caption event lifecycle
 

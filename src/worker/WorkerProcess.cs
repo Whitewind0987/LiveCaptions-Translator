@@ -26,8 +26,34 @@ namespace LiveCaptionsTranslator.worker
         public Task<IWorkerProcess> LaunchAsync(WorkerLaunchRequest request, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!File.Exists(request.ExecutablePath)) throw new FileNotFoundException("The ASR worker executable does not exist.", request.ExecutablePath);
-            var info = new ProcessStartInfo { FileName = Path.GetFullPath(request.ExecutablePath), UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            var info = CreateStartInfo(request);
+            if (!File.Exists(info.FileName)) throw new FileNotFoundException("The ASR worker executable does not exist.", info.FileName);
+            var process = new Process { StartInfo = info, EnableRaisingEvents = true };
+            try
+            {
+                if (!process.Start()) throw new InvalidOperationException("Worker process start returned false.");
+                return Task.FromResult<IWorkerProcess>(new OwnedWorkerProcess(process));
+            }
+            catch { process.Dispose(); throw; }
+        }
+
+        internal static ProcessStartInfo CreateStartInfo(WorkerLaunchRequest request)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            var executablePath = Path.GetFullPath(request.ExecutablePath);
+            var workingDirectory = Path.GetDirectoryName(executablePath);
+            if (string.IsNullOrWhiteSpace(workingDirectory))
+                throw new ArgumentException("The ASR worker executable must have a containing directory.", nameof(request));
+
+            var info = new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
             info.ArgumentList.Add("--control-pipe"); info.ArgumentList.Add(request.ControlPipeName);
             info.ArgumentList.Add("--audio-pipe"); info.ArgumentList.Add(request.AudioPipeName);
             info.ArgumentList.Add("--session"); info.ArgumentList.Add(request.SessionId.ToString("D"));
@@ -41,13 +67,7 @@ namespace LiveCaptionsTranslator.worker
                 info.ArgumentList.Add("--threads"); info.ArgumentList.Add(recognition.ThreadCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             info.Environment[IpcProtocol.NonceEnvironmentVariable] = Convert.ToHexString(request.AuthenticationNonce);
-            var process = new Process { StartInfo = info, EnableRaisingEvents = true };
-            try
-            {
-                if (!process.Start()) throw new InvalidOperationException("Worker process start returned false.");
-                return Task.FromResult<IWorkerProcess>(new OwnedWorkerProcess(process));
-            }
-            catch { process.Dispose(); throw; }
+            return info;
         }
     }
 

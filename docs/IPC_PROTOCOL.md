@@ -260,8 +260,9 @@ caption encoding, `AudioStreamEnd`, and the exact 700-byte audio frame.
 
 Stage 4 remains the transport/process infrastructure. Stage 5 is CPU-only and
 uses explicit local model/runtime paths. Stage 6.1 provides the production
-`ICaptionSource` adapter and Stage 6.2 provides application source ownership,
-but ordinary WPF startup still has no production Local ASR factory. Runtime and
-model provisioning, settings persistence/UI, model management, installer
-packaging, WPF end-to-end Local ASR verification, CUDA, microphone input, and
-automatic fallback remain future work.
+`ICaptionSource` adapter, Stage 6.2 provides application source ownership, and
+Stage 6.3 registers a lazy production Local ASR factory with fixed runtime/model
+provisioning. That work does not change protocol 1.0 or start Local ASR during
+ordinary default Windows startup. Settings persistence/UI, model management,
+installer packaging, WPF end-to-end Local ASR verification, CUDA, microphone
+input, and automatic fallback remain future work.

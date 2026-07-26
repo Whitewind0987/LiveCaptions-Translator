@@ -1,4 +1,4 @@
-# Stage 5 third-party development dependencies
+# Stage 5 third-party dependencies and Stage 6.3 provisioning identities
 
 Stage 5 validates these dependencies from ignored local paths. None of the
 downloaded source trees, models, native runtime binaries or generated fixtures
@@ -23,3 +23,29 @@ the DLL beside the local worker and never mutates system `PATH`. These pins
 support MSVC and the Windows 10 x64 target used for validation. Packaging,
 redistribution, automatic model download and CUDA/GPU binaries are deliberately
 not included yet.
+
+## Stage 6.3 fixed production identities
+
+Stage 6.3 production provisioning resolves only these files beneath
+`AppContext.BaseDirectory\asr`:
+
+- `LiveCaptionsAsrWorker.exe`
+- `onnxruntime.dll`
+- `silero_vad_16k_op15.onnx`
+- `ggml-tiny.bin`
+
+The Silero and Whisper lengths and SHA-256 values in the table above are the
+pinned production checks. `onnxruntime.dll` is checked against its recorded
+14,107,168-byte deployed length; no repository-authoritative DLL SHA-256 is
+recorded. The worker must be an existing, non-directory, non-empty file; no
+repository-authoritative fixed size or SHA-256 is recorded for it.
+
+The existing ignored `asr\silero_vad.onnx` is only a legacy local development
+artifact. It was not renamed or modified, is not a supported production name,
+and is not probed as a fallback. The fixed production name is exclusively
+`asr\silero_vad_16k_op15.onnx`.
+
+Provisioning validates existing assets only. It does not download, copy,
+repair, delete, or package them. Distribution, installer integration, package
+integrity verification, and license/redistribution review remain Stage 6.6
+work.

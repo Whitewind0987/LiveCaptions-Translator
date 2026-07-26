@@ -4,6 +4,7 @@ using System.IO;
 
 using LiveCaptionsTranslator.apis;
 using LiveCaptionsTranslator.captioning;
+using LiveCaptionsTranslator.captioning.local;
 using LiveCaptionsTranslator.captioning.windows;
 using LiveCaptionsTranslator.models;
 using LiveCaptionsTranslator.utils;
@@ -19,6 +20,7 @@ namespace LiveCaptionsTranslator
         private static readonly ConcurrentQueue<string> pendingTextQueue = new();
         private static readonly TranslationTaskQueue translationTaskQueue = new();
         private static readonly CaptionSourceCoordinator captionSourceCoordinator;
+        private static readonly LocalAsrProvisioning localAsrProvisioning;
         private static readonly Caption? caption;
         private static readonly Setting? setting;
 
@@ -46,10 +48,15 @@ namespace LiveCaptionsTranslator
             caption = models.Caption.GetInstance();
             setting = models.Setting.Load();
 
+            localAsrProvisioning = new LocalAsrProvisioning(AppContext.BaseDirectory);
             captionSourceCoordinator = new CaptionSourceCoordinator(
-                () => new WindowsLiveCaptionsSource());
+                () => new WindowsLiveCaptionsSource(),
+                localAsrProvisioning.CreateSource);
             captionSourceCoordinator.StatusChanged += OnCaptionSourceStatusChanged;
         }
+
+        public static LocalAsrProvisioningResult GetLocalAsrProvisioningStatus() =>
+            localAsrProvisioning.Validate();
 
         public static Task<CaptionSourceStartResult> StartCaptionSourceAsync(
             CancellationToken cancellationToken = default) =>

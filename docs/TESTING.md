@@ -883,10 +883,54 @@ Latest validation result:
 - new code warnings: **none**;
 - existing offline `NU1900` warnings: environmental and unchanged.
 
-These tests use injected fake sources and factories. They do not provide a
-production Local ASR factory, provision worker/runtime/model files, expose a
-settings choice, or run Local ASR end to end through the WPF application.
-Stage 6.3 provisioning, Stage 6.4 settings UI, Stage 6.5 WPF end-to-end
-verification, and Stage 6.6 packaging remain untested and not started. All
-Windows 11 Local ASR checks remain pending.
+These tests use injected fake sources and factories. They do not provision
+worker/runtime/model files, expose a settings choice, or run Local ASR end to
+end through the WPF application. Stage 6.3 production provisioning validation
+is recorded below. Stage 6.4 settings UI, Stage 6.5 WPF end-to-end verification,
+and Stage 6.6 packaging remain untested and not started. All Windows 11 Local
+ASR checks remain pending.
+
+## Stage 6.3 fixed provisioning and production-factory validation
+
+Stage 6.3 is complete. Focused deterministic tests passed **31 passed, 0 failed,
+0 skipped**. The complete managed suite passed **391 passed, 0 failed, 0
+skipped**, preserving all 360 Stage 6.2 tests.
+
+Coverage verifies the fixed `AppContext.BaseDirectory\asr` layout, canonical
+contained paths, exact production filenames, rejection of traversal,
+subdirectories, rooted substitutions, and the legacy `silero_vad.onnx` name,
+plus independence from the process current directory. Per-asset and aggregated
+failure tests cover missing files, directories, zero-length files, pinned
+length/hash mismatches, stable relative diagnostics, and absence of file-system
+mutation. The production inspector's real SHA-256 check also proves its file
+handle is released after inspection.
+
+Factory tests verify lazy validation, no pipeline/native ownership after failed
+provisioning, retry after assets become valid, no Local ASR inspection during
+default Windows startup, no automatic fallback, independent source and pipeline
+ownership graphs, and fixed Stage 5 recognition inputs. Worker launch tests
+verify the canonical executable path, child working directory, unchanged
+process current directory, and preservation of all protocol/recognition
+arguments and nonce environment data. Tests inject controlled metadata and hash
+results; they do not embed or generate fake model binaries, while production
+uses real file inspection and SHA-256 validation.
+
+Latest validation result:
+
+- restore with `--ignore-failed-sources`: **passed**;
+- focused Stage 6.3 tests: **31 passed, 0 failed, 0 skipped**;
+- complete managed suite: **391 passed, 0 failed, 0 skipped**;
+- full rebuild: **passed, 0 errors**;
+- `AudioCaptureProbe` build: **passed**;
+- `AsrWorkerProbe` build: **passed**;
+- `git diff --check`: **passed**;
+- new compiler warnings: **none**;
+- warning comparison: 378 existing baseline warnings plus 2 `NU1900`
+  warnings from the unavailable offline vulnerability source.
+
+This validation did **not** run the real 77 MB `ggml-tiny.bin` through the WPF
+application, real Local ASR WPF end-to-end recognition, or installer and
+packaged-runtime verification. Stage 6.4 source-selection/settings UI, Stage
+6.5 real WPF recognition and routing/switch/shutdown acceptance, and Stage 6.6
+runtime/model distribution and package verification remain pending.
 

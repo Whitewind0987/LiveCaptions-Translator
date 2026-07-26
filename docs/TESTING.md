@@ -864,8 +864,8 @@ passed. No Stage 5 internal production file was changed.
 
 ## Stage 6.2 caption-source coordinator validation
 
-Stage 6.2 implementation and final review are complete but currently
-uncommitted. Focused deterministic `CaptionSourceCoordinator` tests passed
+Stage 6.2 implementation and final review are complete and committed. Focused
+deterministic `CaptionSourceCoordinator` tests passed
 **20 passed, 0 failed, 0 skipped**. Coverage includes default selection,
 idempotent reselection, fresh Host ownership, ordered non-overlapping switches,
 stale callback rejection, failed/cancelled target cleanup, serialized Stop and

@@ -928,12 +928,10 @@ Latest validation result:
 - warning comparison: 378 existing baseline warnings plus 2 `NU1900`
   warnings from the unavailable offline vulnerability source.
 
-This validation did **not** run the real 77 MB `ggml-tiny.bin` through the WPF
-application, real Local ASR WPF end-to-end recognition, or installer and
-packaged-runtime verification. Stage 6.4 source-selection/settings validation
-is recorded below. Stage 6.5 real WPF recognition and routing/switch/shutdown
-acceptance and Stage 6.6 runtime/model distribution and package verification
-remain pending.
+This Stage 6.3 validation did **not** run the real 77 MB `ggml-tiny.bin` through
+the WPF application. Stage 6.4 source-selection/settings validation and the
+subsequently completed Windows 10 Stage 6.5 real WPF acceptance are recorded
+below. Installer and packaged-runtime verification remain Stage 6.6 work.
 
 ## Stage 6.4 persisted selection and settings UI validation
 
@@ -984,17 +982,179 @@ and settings-session boundaries. They do not require the authoritative 77 MB
 model files and did not run native recognition. Stage 6.4 makes Local ASR
 selectable and configurable but is not real WPF end-to-end acceptance.
 
-Stage 6.5 remains **next, not started**. It still requires real WPF startup with
-the production worker and authoritative models, real WASAPI loopback
-recognition, partial/final display, translation/history routing, real-resource
-switching and failure recovery, shutdown/process-cleanup acceptance, Windows 10
-end-to-end acceptance, and any required Windows 11 verification.
+## Stage 6.5 Windows 10 real WPF Local ASR acceptance
 
-Stage 6.6 remains **not started**. It still requires worker and ONNX Runtime
+Manual acceptance date: **2026-07-26**. Stage 6.5 is **complete on Windows 10**.
+Equivalent Windows 11 runtime acceptance remains pending.
+
+### Managed and native validation
+
+- complete managed suite: **445 passed, 0 failed, 0 skipped**;
+- all prior managed tests preserved: **430**;
+- focused `LocalAsrCaptionSource`: **30 passed**;
+- focused Stage 6.5 driver/trace: **13 passed**;
+- focused Coordinator/selection: **44 passed**;
+- application rebuild: **passed, 0 errors, 378 existing warnings**;
+- new compiler warnings: **none**;
+- `AudioCaptureProbe`: **passed, 0 warnings, 0 errors**;
+- `AsrWorkerProbe`: **passed, 0 warnings, 0 errors**;
+- `git diff --check`: **passed**;
+- recognition Release build: **passed**, with repository-owned native code
+  retaining `/W4 /WX`;
+- recognition CTest: **2/2 passed**;
+- synthetic probe: **250/250 frames, 0 gaps, worker exit 0, no forced
+  termination**;
+- Silero fresh-process initialization: **20/20 passed**;
+- complete SAPI WAV recognition: **3/3 passed**.
+
+### Native SAPI WAV prerequisite
+
+The deterministic, uncommitted 16 kHz mono PCM16 fixture contained:
+
+```text
+This is a local speech recognition test. The worker should produce structured caption events.
+```
+
+The final native prerequisite processed 399 frames and 255,360 framed bytes,
+with 160 bytes of final-frame padding, 0 gaps, 0 invalid frames, and 0 heartbeat
+failures. All five recognition capabilities were present. Reset, Partial,
+Committed, and Final were accepted; both expected phrase groups matched.
+Shutdown was graceful, forced termination was false, exit code was 0, and no
+owned worker remained. The WAV remains an external acceptance fixture and is
+not linked or committed.
+
+### Real production route and startup
+
+The accepted route was:
+
+```text
+rendered SAPI WAV
+-> Windows render endpoint
+-> WASAPI loopback
+-> AudioCaptureService
+-> AudioWorkerPipeline
+-> native recognition worker
+-> Reset / Partial / Committed / Final
+-> LocalAsrCaptionSource
+-> CaptionSourceHost gate
+-> CaptionSourceCoordinator snapshot
+-> Translator.SyncLoop
+-> main-window and overlay original-caption properties
+-> normal LogOnly queue
+-> SQLiteHistoryLogger
+```
+
+Persisted and active sources were both LocalAsr. Startup selected LocalAsr
+directly, with no Windows-to-Local double transition. Provisioning was Ready,
+the source reached Running, protocol 1.0 was negotiated, capabilities value 47
+was reported, and real worker and capture sessions were established.
+
+The accepted downstream event sequence was:
+
+```text
+Reset
+Partial  segment 1 revision 1
+Final    segment 1 revision 2
+Final    segment 2 revision 1
+```
+
+The first stable Final was normalized from Committed without changing sequence,
+segment, revision, text, audio bounds, or timestamps. The matching native Final
+was deduplicated. Revisions were neither renumbered nor fabricated.
+
+### Final clean recognition cycle
+
+- capture frames produced: **758**;
+- capture frames consumed: **758**;
+- pump frames: **758**;
+- worker-summary frames: **758**;
+- framed bytes matched end to end: **485,120**;
+- dropped frames: **0**;
+- source gaps: **0**;
+- worker gaps: **0**;
+- invalid frames: **0**;
+- heartbeat failures: **0**.
+
+Observed recognized text was:
+
+- Partial: `This is a local`;
+- stable segment 1: `This is a local speech recognition test.`;
+- stable segment 2: `The worker shoot produced structured caption events.`.
+
+The main window and active overlay both displayed expected recognized text. The
+recorded `shoot produced` wording is the actual model output and is intentionally
+not corrected.
+
+### LogOnly and SQLite history
+
+LogOnly was enabled through the real user-facing control. Recognized text
+entered the normal Translator queue and real `SQLiteHistoryLogger`. One accepted
+row was:
+
+```text
+SourceText: This is a local.
+TranslatedText: N/A
+TargetLanguage: N/A
+ApiUsed: LogOnly
+```
+
+A structured-caption LogOnly row was also written, and `TranslationLogged` was
+observed. Acceptance code did not insert database rows directly, and no network
+translation API was required for this route.
+
+### Source switching and controlled failure recovery
+
+LocalAsr first reached Running. Selecting Windows Live Captions through the real
+Settings UI failed with `LiveCaptions.exe is not available on this system.` No
+automatic fallback occurred, the failed Windows choice was not falsely
+persisted, and the previous Local capture, pump, pipes, and worker were cleaned.
+Selecting Local through Settings created fresh worker and capture identities,
+and recognition, Partial/Final display, and history resumed.
+
+Only the exact application-owned worker PID was terminated during the
+controlled-failure check. Capture stopped, the pump canceled and joined, the
+pipeline/source became Faulted, and cleanup failures were empty. Safe failure
+text appeared in Settings, no automatic fallback occurred, and persisted
+LocalAsr remained unchanged. `Retry selected source` used the normal settings
+session and Coordinator to create a third fresh worker/capture session, after
+which recognition, display, and history recovered.
+
+Pipeline Completion is the terminal boundary for each session. Normal Stop is
+not treated as unexpected; unexpected completion faults the source, rejects
+stale and post-stop events, and retains owned cleanup of capture, pump, pipes,
+worker, source, and Host. Recovery is explicit only: there is no automatic
+restart or fallback.
+
+### Acceptance-only diagnostics and normal shutdown
+
+The Stage 6.5 trace and in-process UI driver were acceptance-only. They remain
+dormant unless explicit absolute plan and evidence paths are both supplied.
+They use the real WPF Dispatcher and controls and can neither inject captions,
+bypass the Coordinator, start the pipeline directly, set LogOnly directly,
+write SQLite rows directly, nor modify recognition, timing, buffering,
+fallback, or shutdown. They write passive JSONL only to the explicit external
+sandbox evidence path and are not a supported automation API.
+
+Final close used the real WPF window-close path. Pump phase was Completed,
+source completion was observed, the pump joined, owned cancellation was false,
+failure kind was None, and cleanup failures were empty. Worker shutdown was
+graceful, forced termination was false, and worker exit code was 0. No
+`LiveCaptionsTranslator`, `LiveCaptionsAsrWorker`, or `LiveCaptions` process
+remained, and no caption or history activity appeared after shutdown.
+
+No IPC field, recognition threshold, timeout, bounded-buffer capacity,
+automatic fallback, dependency, or model contract changed during Stage 6.5.
+
+Stage 6.6 is **next, not started**. It still requires worker and ONNX Runtime
 distribution, authoritative Silero/Whisper deployment, installer integration,
 model download or external acquisition experience, package integrity and
 release-asset verification, and redistribution/license review. Multiple model
 sizes, model selection/deletion, file pickers, CUDA/GPU/DirectML, microphone
 input, automatic fallback, background provisioning polling, and filesystem
 watching remain out of scope.
+
+Windows 11 still requires equivalent real WPF startup, WASAPI recognition,
+display/history, source switching, controlled failure recovery, normal
+shutdown, and process-residue verification. No Windows 11 Stage 6.5 result is
+inferred from the Windows 10 acceptance.
 

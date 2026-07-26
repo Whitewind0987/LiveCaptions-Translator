@@ -1,4 +1,5 @@
 using LiveCaptionsTranslator.captioning.windows;
+using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator.captioning
 {
@@ -220,6 +221,12 @@ namespace LiveCaptionsTranslator.captioning
                 snapshotToPublish = latestSnapshot;
             }
 
+            Stage65AcceptanceTrace.Write("caption.host.event-accepted", new
+            {
+                SourceId = source.SourceId,
+                CaptionEvent = captionEvent,
+                Snapshot = snapshotToPublish
+            });
             InvokeSafely(SnapshotChanged, snapshotToPublish);
         }
 

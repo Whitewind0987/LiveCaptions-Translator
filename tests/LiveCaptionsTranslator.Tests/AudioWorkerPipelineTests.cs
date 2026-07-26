@@ -22,6 +22,7 @@ public sealed class AudioWorkerPipelineTests
         captureFactory.Created[0].EmitData(AudioTestData.ConstantPcm16Frame());
         await WaitAsync(() => worker.Transports[0].Frames.Count == 1);
         await pipeline.StopAsync(Token);
+        await pipeline.Completion.WaitAsync(Token);
 
         Assert.Equal(AudioWorkerPipelineState.Stopped, pipeline.State);
         Assert.Equal(1, pipeline.Diagnostics.Pump!.FramesSent);
@@ -64,7 +65,8 @@ public sealed class AudioWorkerPipelineTests
         await using var pipeline = new AudioWorkerPipeline(capture, worker.Supervisor);
         await pipeline.StartAsync(null, Token);
         captureFactory.Created[0].EmitData(AudioTestData.ConstantPcm16Frame());
-        await WaitAsync(() => pipeline.State == AudioWorkerPipelineState.Faulted && worker.Processes[0].HasExited);
+        await pipeline.Completion.WaitAsync(Token);
+        Assert.True(worker.Processes[0].HasExited);
         Assert.Equal(AsrWorkerFailureKind.AudioPipeClosed, pipeline.Diagnostics.FailureKind);
         Assert.NotEqual(AudioCaptureState.Running, capture.State);
     }
@@ -262,7 +264,7 @@ public sealed class AudioWorkerPipelineTests
         worker.Transports[0].EmitPartial("This is a local.");
 
         var stopTask = pipeline.StopAsync(Token);
-        await commitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await commitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), Token);
         Assert.False(stopTask.IsCompleted);
 
         commitBlock.Set();

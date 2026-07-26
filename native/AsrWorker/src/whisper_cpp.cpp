@@ -32,7 +32,7 @@ public:
         parameters.suppress_blank = true;
         parameters.suppress_nst = true;
         parameters.language = language_ == "auto" ? nullptr : language_.c_str();
-        parameters.detect_language = language_ == "auto";
+        parameters.detect_language = false;
         parameters.abort_callback = [](void* context) { return static_cast<whisper_engine*>(context)->cancel_.load(); };
         parameters.abort_callback_user_data = this;
         if (whisper_full(context_, parameters, samples.data(), static_cast<int>(samples.size())) != 0)

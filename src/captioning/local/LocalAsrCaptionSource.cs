@@ -5,6 +5,8 @@ namespace LiveCaptionsTranslator.captioning.local
     internal interface ILocalAsrPipeline : IAsyncDisposable
     {
         Guid? SessionId { get; }
+        Task Completion { get; }
+        string? FailureReason { get; }
         event EventHandler<CaptionEvent>? CaptionEventReceived;
         Task StartAsync(CancellationToken cancellationToken);
         Task StopAsync(CancellationToken cancellationToken);
@@ -22,6 +24,8 @@ namespace LiveCaptionsTranslator.captioning.local
         }
 
         public Guid? SessionId => pipeline.Diagnostics.Capture.SessionId;
+        public Task Completion => pipeline.Completion;
+        public string? FailureReason => pipeline.Diagnostics.FailureReason;
 
         public event EventHandler<CaptionEvent>? CaptionEventReceived
         {
@@ -208,6 +212,7 @@ namespace LiveCaptionsTranslator.captioning.local
                     completion.TrySetResult(CaptionSourceStartResult.Started(sessionId.Value));
                 }
                 ownedCancellation.Dispose();
+                run.CompletionMonitor = ObservePipelineCompletionAsync(run);
             }
             catch (OperationCanceledException) when (ownedCancellation.IsCancellationRequested)
             {
@@ -247,6 +252,66 @@ namespace LiveCaptionsTranslator.captioning.local
                 completion.TrySetResult(CaptionSourceStartResult.Failed(
                     CaptionSourceState.Faulted, reason));
             }
+        }
+
+        private async Task ObservePipelineCompletionAsync(ActiveRun run)
+        {
+            string? completionFailure = null;
+            try
+            {
+                await run.Pipeline.Completion.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                completionFailure = ex.Message;
+            }
+
+            TaskCompletionSource? cleanupCompletion;
+            bool scheduleFaultedStatus;
+            string reason;
+            lock (stateLock)
+            {
+                if (!ReferenceEquals(activeRun, run) ||
+                    run.Generation != generation ||
+                    stopTask != null ||
+                    Volatile.Read(ref disposeStarted) != 0)
+                {
+                    return;
+                }
+
+                Volatile.Write(ref run.PipelineCompleted, 1);
+                run.AcceptEvents = false;
+                run.PublicationEpoch++;
+                generation++;
+                cleanupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                stopTask = cleanupCompletion.Task;
+                reason = "Local ASR pipeline stopped unexpectedly: " +
+                    (completionFailure ?? run.Pipeline.FailureReason ??
+                     "the pipeline ended without a failure reason.");
+                scheduleFaultedStatus = ChangeStateLocked(CaptionSourceState.Faulted, reason);
+            }
+
+            ScheduleStatusDrain(scheduleFaultedStatus);
+            var cleanupFailure = await CleanupRunAsync(run).ConfigureAwait(false);
+            var scheduleCleanupFailure = false;
+            lock (stateLock)
+            {
+                if (ReferenceEquals(activeRun, run))
+                    activeRun = null;
+                if (ReferenceEquals(stopTask, cleanupCompletion.Task))
+                    stopTask = null;
+                if (!string.IsNullOrWhiteSpace(cleanupFailure))
+                {
+                    reason = CombineFailure(reason, cleanupFailure);
+                    scheduleCleanupFailure = ChangeStateLocked(CaptionSourceState.Faulted, reason);
+                }
+            }
+
+            ScheduleStatusDrain(scheduleCleanupFailure);
+            if (cleanupFailure == null)
+                cleanupCompletion.TrySetResult();
+            else
+                cleanupCompletion.TrySetException(new InvalidOperationException(cleanupFailure));
         }
 
         public Task StopAsync(CancellationToken cancellationToken = default)
@@ -336,8 +401,11 @@ namespace LiveCaptionsTranslator.captioning.local
         private async Task CleanupRunCoreAsync(ActiveRun run)
         {
             var failures = new List<Exception>();
-            try { await run.Pipeline.StopAsync(CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception ex) { failures.Add(new InvalidOperationException("Pipeline stop failed.", ex)); }
+            if (Volatile.Read(ref run.PipelineCompleted) == 0)
+            {
+                try { await run.Pipeline.StopAsync(CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception ex) { failures.Add(new InvalidOperationException("Pipeline stop failed.", ex)); }
+            }
 
             EventHandler<CaptionEvent>? handler;
             Task? publications = null;
@@ -385,11 +453,7 @@ namespace LiveCaptionsTranslator.captioning.local
                     run.PublishedStableCaption = null;
                     publish = true;
                 }
-                else if (captionEvent.Kind == CaptionEventKind.Partial)
-                {
-                    return;
-                }
-                else
+                else if (captionEvent.Kind != CaptionEventKind.Partial)
                 {
                     var identity = new StableCaptionIdentity(
                         captionEvent.SessionId, captionEvent.SegmentId, captionEvent.Revision);
@@ -399,8 +463,8 @@ namespace LiveCaptionsTranslator.captioning.local
                     run.PublishedStableCaption = identity;
                     if (captionEvent.Kind == CaptionEventKind.Committed)
                         captionEvent = AsFinal(captionEvent);
-                    publish = true;
                 }
+                publish = true;
 
                 if (run.PublicationCount == 0)
                 {
@@ -571,6 +635,8 @@ namespace LiveCaptionsTranslator.captioning.local
             internal bool AcceptEvents { get; set; } = true;
             internal long PublicationEpoch { get; set; }
             internal Task? CleanupTask { get; set; }
+            internal Task? CompletionMonitor { get; set; }
+            internal int PipelineCompleted;
         }
 
         private readonly record struct VersionedStatus(

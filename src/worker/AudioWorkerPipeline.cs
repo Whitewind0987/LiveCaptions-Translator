@@ -1,6 +1,7 @@
 using LiveCaptionsTranslator.audio;
 using LiveCaptionsTranslator.ipc;
 using LiveCaptionsTranslator.captioning;
+using LiveCaptionsTranslator.utils;
 
 namespace LiveCaptionsTranslator.worker
 {
@@ -41,8 +42,15 @@ namespace LiveCaptionsTranslator.worker
         private readonly AsyncLocal<int> captionPublicationDepth = new();
         private readonly Queue<(CaptionEvent Event, long Generation)> captionQueue = [];
         private bool captionDispatcherScheduled;
+        private TaskCompletionSource sessionCompletion = NewCompletedSignal();
 
         private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static TaskCompletionSource NewCompletedSignal()
+        {
+            var completion = NewSignal();
+            completion.TrySetResult();
+            return completion;
+        }
 
         public AudioWorkerPipeline(AudioCaptureService capture, AsrWorkerSupervisor supervisor)
             : this(capture, supervisor, AudioPumpDrainOptions.Default, null)
@@ -64,6 +72,7 @@ namespace LiveCaptionsTranslator.worker
         }
 
         public AudioWorkerPipelineState State { get { lock (stateLock) return state; } }
+        public Task Completion { get { lock (stateLock) return sessionCompletion.Task; } }
         public event EventHandler<CaptionEvent>? CaptionEventReceived;
         public AudioWorkerPipelineDiagnostics Diagnostics
         {
@@ -72,6 +81,7 @@ namespace LiveCaptionsTranslator.worker
 
         public async Task StartAsync(string? endpointId = null, CancellationToken cancellationToken = default)
         {
+            Stage65AcceptanceTrace.Write("pipeline.start.requested", new { EndpointId = endpointId });
             await lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
             var ownsLifecycle = true;
             try
@@ -79,11 +89,14 @@ namespace LiveCaptionsTranslator.worker
                 ObjectDisposedException.ThrowIf(disposed, this);
                 if (state == AudioWorkerPipelineState.Streaming) return;
                 if (terminalCleanupTask is { IsCompleted: false }) throw new InvalidOperationException("Pipeline cleanup is still in progress.");
+                sessionCompletion = NewSignal();
                 state = AudioWorkerPipelineState.Starting;
                 summary = null; lastPumpDiagnostics = null; pumpJoined = false; failureKind = AsrWorkerFailureKind.None; failureReason = null; cleanupFailures.Clear(); captureSessionId = Guid.Empty;
                 var worker = await supervisor.StartAsync(cancellationToken).ConfigureAwait(false);
+                Stage65AcceptanceTrace.Write("pipeline.worker.started", new { Result = worker, Diagnostics = supervisor.Diagnostics });
                 if (!worker.Success) throw new WorkerTransportException(worker.FailureKind, worker.FailureReason ?? "Worker failed to start.");
                 var captureResult = await capture.StartAsync(endpointId, cancellationToken).ConfigureAwait(false);
+                Stage65AcceptanceTrace.Write("pipeline.capture.started", new { Result = captureResult, Diagnostics = capture.Diagnostics });
                 if (!captureResult.Success || captureResult.SessionId == null) throw new WorkerTransportException(AsrWorkerFailureKind.AudioCaptureFailed, captureResult.FailureReason ?? "Audio capture failed to start.");
                 captureSessionId = captureResult.SessionId.Value;
                 var transport = supervisor.ActiveTransport ?? throw new WorkerTransportException(AsrWorkerFailureKind.ControlPipeClosed, "Worker transport is unavailable.");
@@ -95,15 +108,18 @@ namespace LiveCaptionsTranslator.worker
                 }
                 transport.CaptionEventReceived += OnCaptionEventReceived;
                 await transport.StartAudioStreamAsync(new StartAudioStreamPayload(worker.SessionId!.Value, captureSessionId, 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), cancellationToken).ConfigureAwait(false);
+                Stage65AcceptanceTrace.Write("pipeline.audio-stream.started", new { worker.SessionId, CaptureSessionId = captureSessionId });
                 sessionCancellation = new CancellationTokenSource();
                 pump = new AudioFramePump(capture.FrameBuffer, transport, worker.SessionId.Value, captureSessionId, 1);
                 pumpTask = pump.RunAsync(sessionCancellation.Token);
                 pumpMonitorTask = MonitorPumpAsync(pumpTask);
                 await supervisor.SetStreamingAsync(true, cancellationToken).ConfigureAwait(false);
                 state = AudioWorkerPipelineState.Streaming;
+                Stage65AcceptanceTrace.Write("pipeline.streaming", new { Diagnostics, Worker = supervisor.Diagnostics });
             }
             catch (Exception ex)
             {
+                Stage65AcceptanceTrace.Write("pipeline.start.failed", new { Exception = ex.ToString() });
                 var kind = ex is WorkerTransportException transportException ? transportException.Kind : AsrWorkerFailureKind.AudioPumpFailed;
                 var cleanup = BeginTerminalCleanup(kind, ex.Message, normalStop: false);
                 lifecycle.Release();
@@ -245,8 +261,13 @@ namespace LiveCaptionsTranslator.worker
                     else if (failures.Count != 0) { failureKind = AsrWorkerFailureKind.CleanupFailed; failureReason = string.Join(" | ", failures); }
                     state = failureKind == AsrWorkerFailureKind.None ? AudioWorkerPipelineState.Stopped : AudioWorkerPipelineState.Faulted;
                 }
+                Stage65AcceptanceTrace.Write("pipeline.cleanup.completed", new { Diagnostics, Worker = supervisor.Diagnostics });
             }
-            finally { lifecycle.Release(); }
+            finally
+            {
+                lifecycle.Release();
+                sessionCompletion.TrySetResult();
+            }
         }
 
         private void OnCaptionEventReceived(object? sender, CaptionEvent captionEvent)
@@ -275,7 +296,11 @@ namespace LiveCaptionsTranslator.worker
                 _ = BeginTerminalCleanup(AsrWorkerFailureKind.ProtocolViolation,
                     "Pipeline caption publication queue exceeded its bounded capacity.", normalStop: false);
             }
-            else if (schedule) ThreadPool.QueueUserWorkItem(_ => DrainCaptionQueue());
+            else
+            {
+                Stage65AcceptanceTrace.Write("pipeline.caption.received", captionEvent);
+                if (schedule) ThreadPool.QueueUserWorkItem(_ => DrainCaptionQueue());
+            }
         }
 
         private void DrainCaptionQueue()

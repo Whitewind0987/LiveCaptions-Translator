@@ -66,6 +66,29 @@ public sealed class CaptionSourceCoordinatorTests
     }
 
     [Fact]
+    public async Task SelectingFaultedActiveSourceReplacesItWithFreshSource()
+    {
+        var tracker = new SourceTracker();
+        var faulted = new ControlledCaptionSource("local-faulted", tracker);
+        var replacement = new ControlledCaptionSource("local-replacement", tracker);
+        var sources = new Queue<ControlledCaptionSource>([faulted, replacement]);
+        await using var coordinator = new CaptionSourceCoordinator(
+            () => new ControlledCaptionSource("windows", tracker),
+            () => sources.Dequeue());
+        await coordinator.SelectAsync(CaptionSourceKind.LocalAsr);
+        faulted.FailRuntime("worker exited");
+
+        var result = await coordinator.SelectAsync(CaptionSourceKind.LocalAsr);
+
+        Assert.True(result.Success);
+        Assert.Equal(CaptionSourceState.Running, coordinator.State);
+        Assert.Equal(1, faulted.StopCount);
+        Assert.Equal(1, faulted.DisposeCount);
+        Assert.Equal(1, replacement.StartCount);
+        Assert.Equal(1, tracker.MaxActive);
+    }
+
+    [Fact]
     public async Task SwitchStopsAndDisposesOldSourceBeforeFreshSourceStarts()
     {
         var tracker = new SourceTracker();
@@ -783,6 +806,13 @@ public sealed class CaptionSourceCoordinatorTests
         internal void ReleaseStart() => startRelease.TrySetResult();
 
         internal void FailStop(Exception failure) => stopRelease.TrySetException(failure);
+
+        internal void FailRuntime(string reason)
+        {
+            State = CaptionSourceState.Faulted;
+            FailureReason = reason;
+            PublishStatus();
+        }
 
         internal void EmitText(string text)
         {

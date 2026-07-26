@@ -57,9 +57,12 @@ private:
             const auto name = session_.GetOutputNameAllocated(index, allocator);
             if (std::string_view(name.get()) != output_names[index]) throw protocol_error("Silero output metadata does not match pinned v6.2.1 interface");
         }
-        const auto input = session_.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
-        const auto state = session_.GetInputTypeInfo(1).GetTensorTypeAndShapeInfo();
-        const auto rate = session_.GetInputTypeInfo(2).GetTensorTypeAndShapeInfo();
+        const auto input_type = session_.GetInputTypeInfo(0);
+        const auto state_type = session_.GetInputTypeInfo(1);
+        const auto rate_type = session_.GetInputTypeInfo(2);
+        const auto input = input_type.GetTensorTypeAndShapeInfo();
+        const auto state = state_type.GetTensorTypeAndShapeInfo();
+        const auto rate = rate_type.GetTensorTypeAndShapeInfo();
         const auto input_shape = input.GetShape(); const auto state_shape = state.GetShape();
         const auto valid_input_shape = input_shape.size() == 2 && (input_shape[0] == -1 || input_shape[0] == 1) && (input_shape[1] == -1 || input_shape[1] == 576);
         const auto valid_state_shape = state_shape.size() == 3 && state_shape[0] == 2 && (state_shape[1] == -1 || state_shape[1] == 1) && state_shape[2] == 128;

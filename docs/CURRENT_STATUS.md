@@ -20,9 +20,11 @@
   - Stage 6.2 application caption-source ownership and selection lifecycle
   - Stage 6.3 fixed runtime/model provisioning and production Local ASR factory
   - Stage 6.4 persisted caption-source selection and settings UI
-- Current status: Stage 6.4 is complete.
-- Next stage: Stage 6.5 real WPF Local ASR end-to-end verification, only after
-  explicit approval. Stage 6.6 packaging/installation has not started.
+  - Stage 6.5 real WPF Local ASR end-to-end verification, accepted on Windows 10
+- Current status: Stage 6.5 is complete on Windows 10. Windows 11 runtime
+  acceptance remains pending.
+- Next stage: Stage 6.6 packaging and installation, only after explicit
+  approval. Stage 6.6 has not started.
 
 ## Environment
 
@@ -106,9 +108,9 @@ The following root-level runtime files are ignored and were not committed:
 On Windows 10, the safe default `WindowsLiveCaptions` has no available real-time
 caption source when the operating-system feature is absent. The application
 shows a warning and idles. Users can now persist and select Local ASR through
-Settings, but real WPF end-to-end recognition acceptance is still Stage 6.5
-work and the required runtime/model files are not distributed by the
-application.
+Settings; its real WPF end-to-end recognition path is accepted on Windows 10.
+Equivalent Windows 11 acceptance remains pending, and the required
+runtime/model files are not yet distributed by the application.
 
 ## Stage 2A implementation
 
@@ -462,7 +464,8 @@ remains recorded as evidence from the immediately preceding lifecycle revision.
 Windows 11 remains pending. Stage 5 is complete; its recognition pipeline is
 available through the Stage 6.1 production `ICaptionSource` boundary and the
 Stage 6.3 production factory. Stage 6.4 provides user-facing persisted
-selection; real WPF end-to-end acceptance remains incomplete.
+selection, and Stage 6.5 has completed real WPF end-to-end acceptance on
+Windows 10. Equivalent Windows 11 runtime acceptance remains pending.
 
 ## Stage 6.1 production Local ASR source
 
@@ -476,11 +479,12 @@ ICaptionSource
 -> AudioWorkerPipeline
 ```
 
-The adapter validates and forwards Reset, validates but suppresses Partial,
-normalizes Committed to Final, deduplicates the matching Stage 5 Final, and
-forwards native Final-only output. Its stable identity cache is bounded to the
-most recent `SessionId + SegmentId + Revision`; consecutive segments remain
-valid at the single downstream `CaptionSourceHost` gate.
+The adapter validates and forwards Reset and accepted Partial events,
+normalizes Committed to Final without changing event identity or audio/time
+metadata, deduplicates the matching Stage 5 Final, and forwards native
+Final-only output. Its stable identity cache is bounded to the most recent
+`SessionId + SegmentId + Revision`; consecutive segments remain valid at the
+single downstream `CaptionSourceHost` gate.
 
 Start is idempotent under concurrent callers; Stop is safe before Start and
 when repeated. Restart creates a fresh run identity, stale old-run events are
@@ -611,6 +615,56 @@ This validation did not run real native recognition through the WPF
 application. It establishes selection, persistence, status, safe failure, and
 settings-session behavior only.
 
+## Stage 6.5 Windows 10 real WPF Local ASR acceptance
+
+Stage 6.5 is complete on Windows 10. The real application started directly from
+persisted LocalAsr with provisioning Ready, protocol 1.0, capabilities 47, and
+one source transition. The accepted production path covered WASAPI loopback,
+the managed pipeline, the native worker, both caption gates, Coordinator
+snapshots, `Translator.SyncLoop`, main-window and overlay display, the normal
+LogOnly queue, and `SQLiteHistoryLogger`.
+
+Real acceptance found and corrected eight defects: Silero `Ort::TypeInfo`
+ownership, Whisper `auto` transcription, duplicate WPF startup ownership,
+suppressed Partial revision 1, missing propagation of unexpected pipeline
+completion, failed same-source retry being treated as idempotent, the Settings
+ComboBox being unable to reselect its failed value, and non-Dispatcher
+acceptance UI reads. No IPC field, protocol version, recognition threshold,
+timeout, buffer capacity, fallback rule, dependency, or model contract changed.
+
+The accepted real event route produced Reset, segment-1 Partial revision 1,
+segment-1 Final revision 2 normalized from Committed, and segment-2 Final
+revision 1. Matching native Final was deduplicated without renumbering or
+fabrication. The main window and active overlay displayed the recognized text.
+LogOnly was enabled through its real control, and the normal queue and SQLite
+writer stored recognized text with `N/A` translation/language and `LogOnly`
+metadata; acceptance code inserted no row.
+
+The final clean cycle produced, consumed, pumped, and summarized 758 frames and
+485,120 framed bytes, with zero drops, source gaps, worker gaps, invalid frames,
+or heartbeat failures. Normal close used the WPF window path; the pump completed
+and joined, source completion was observed, owned cancellation was false,
+failure kind was None, cleanup failures were empty, worker shutdown was
+graceful with exit code 0, forced termination was false, and no application,
+worker, or Windows Live Captions process remained.
+
+Runtime switching and controlled failure recovery also passed. Selecting the
+unavailable Windows source reported `LiveCaptions.exe is not available on this
+system.`, did not persist the failed choice, and did not fall back. Explicitly
+selecting Local created fresh worker and capture identities. Terminating only
+the application-owned worker stopped capture, canceled and joined the pump,
+made the source Faulted, retained persisted LocalAsr, and exposed safe failure
+text; the Settings retry action then created a third fresh session and restored
+recognition, display, and history.
+
+Final validation recorded 445 passed, 0 failed, 0 skipped, preserving all prior
+430 managed tests. Focused results were 30 `LocalAsrCaptionSource`, 13 Stage 6.5
+driver/trace, and 44 Coordinator/selection tests. The application rebuild passed
+with 0 errors and 378 existing warnings, with no new compiler warning. Both
+developer probes built with 0 warnings and 0 errors. Recognition Release build,
+recognition CTest 2/2, synthetic 250/250 transport, Silero initialization 20/20,
+and complete SAPI recognition 3/3 passed.
+
 ## Stage 6 roadmap and limitations
 
 - Stage 5 recognition pipeline: **complete**
@@ -619,14 +673,15 @@ settings-session behavior only.
 - Stage 6.3 fixed runtime/model provisioning and production factory:
   **complete**
 - Stage 6.4 persisted selection and source-selection UI: **complete**
-- Stage 6.5 real WPF Local ASR end-to-end verification: **next, not started**
-- Stage 6.6 packaging and installation experience: **not started**
+- Stage 6.5 real WPF Local ASR end-to-end verification: **complete on Windows
+  10; Windows 11 pending**
+- Stage 6.6 packaging and installation experience: **next, not started**
 
-Stage 6.4 makes Local ASR selectable and configurable but does not establish
-real end-to-end recognition acceptance. Stage 6.5 still owns real WPF startup,
-WASAPI loopback recognition, partial/final display, translation/history routing,
-runtime switching and failure recovery with real native resources, shutdown and
-process cleanup, Windows 10 acceptance, and any required Windows 11 verification.
+Stage 6.5 completed real WPF startup, WASAPI loopback recognition,
+partial/final display, LogOnly/history routing, runtime switching, controlled
+failure recovery, normal shutdown, process cleanup, and Windows 10 acceptance.
+Equivalent Windows 11 startup, recognition, display/history, switching/failure
+recovery, shutdown, and process-residue verification remain pending.
 Stage 6.6 still owns worker/ONNX Runtime distribution, authoritative Silero and
 Whisper deployment, installer and external model-acquisition experience,
 package integrity/release-asset verification, and redistribution/license review.

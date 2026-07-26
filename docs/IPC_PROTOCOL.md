@@ -263,6 +263,8 @@ uses explicit local model/runtime paths. Stage 6.1 provides the production
 `ICaptionSource` adapter, Stage 6.2 provides application source ownership, and
 Stage 6.3 registers a lazy production Local ASR factory with fixed runtime/model
 provisioning. Stage 6.4 adds persisted source selection and its settings UI
-without changing protocol 1.0. Real WPF Local ASR end-to-end verification,
-model management, installer packaging, CUDA, microphone input, and automatic
-fallback remain future work.
+without changing protocol 1.0. Stage 6.5 completed real WPF Local ASR
+end-to-end verification on Windows 10 without changing protocol 1.0; equivalent
+Windows 11 runtime verification remains pending. Model management, Stage 6.6
+installer packaging, CUDA, microphone input, and automatic fallback remain
+future work.

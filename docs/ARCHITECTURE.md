@@ -13,8 +13,10 @@ model-free transport-only worker. Stage 6.1 integrates that pipeline behind a
 production `ICaptionSource`, Stage 6.2 adds application-level caption-source
 ownership and selection, and Stage 6.3 adds the fixed runtime/model layout,
 validation, and production Local ASR factory. Stage 6.4 adds the persisted
-caption-source preference and the user-facing settings workflow. Real WPF
-Local ASR end-to-end acceptance and packaging remain later Stage 6 work.
+caption-source preference and the user-facing settings workflow. Stage 6.5
+completes real WPF Local ASR end-to-end acceptance on Windows 10. Equivalent
+Windows 11 runtime acceptance remains pending, and packaging remains Stage 6.6
+work.
 
 ## Objective
 
@@ -352,12 +354,13 @@ ICaptionSource
 -> AudioWorkerPipeline
 ```
 
-`LocalAsrCaptionSource` validates Stage 5 events and exposes only stable caption
-output. Reset is validated and forwarded; Partial is validated but suppressed;
-Committed is normalized to Final; and the matching Stage 5 Final is
-deduplicated. Native Final-only output is forwarded. Stable identity is bounded
-to the most recent `SessionId + SegmentId + Revision`, while consecutive
-segments remain valid through the downstream `CaptionSourceHost` gate.
+`LocalAsrCaptionSource` validates Stage 5 events and forwards accepted Reset and
+Partial events. Committed is normalized to Final, preserving its sequence,
+segment, revision, text, audio bounds, and timestamps; the matching Stage 5
+Final is deduplicated. Native Final-only output is forwarded. Stable identity
+is bounded to the most recent `SessionId + SegmentId + Revision`, while
+consecutive segments remain valid through the downstream `CaptionSourceHost`
+gate.
 
 Lifecycle ownership supports idempotent and concurrent Start, Stop before
 Start, repeated Stop, restart with a fresh run identity, and stale old-run event
@@ -572,9 +575,94 @@ Supported recovery is explicit:
 - A preference-save failure may leave active and persisted sources different;
   the failure remains visible and retry can persist without fallback.
 
-Stage 6.4 makes Local ASR selectable and configurable, but it does not establish
-real WPF end-to-end recognition acceptance or distributable packaging. Those
-remain Stage 6.5 and Stage 6.6 work respectively.
+Stage 6.4 made Local ASR selectable and configurable but did not by itself
+establish real WPF end-to-end recognition acceptance or distributable
+packaging. Stage 6.5 has since completed Windows 10 end-to-end acceptance;
+packaging remains Stage 6.6 work.
+
+## Stage 6.5 Windows 10 real WPF Local ASR acceptance
+
+Stage 6.5 is complete on Windows 10. Windows 11 runtime acceptance remains
+pending, and Stage 6.6 packaging and installation have not started. The
+accepted production route is:
+
+```text
+rendered SAPI WAV
+-> Windows render endpoint
+-> WASAPI loopback
+-> AudioCaptureService
+-> AudioWorkerPipeline
+-> native recognition worker
+-> Reset / Partial / Committed / Final
+-> LocalAsrCaptionSource
+-> CaptionSourceHost gate
+-> CaptionSourceCoordinator snapshot
+-> Translator.SyncLoop
+-> main-window and overlay original-caption properties
+-> normal LogOnly queue
+-> SQLiteHistoryLogger
+```
+
+The real accepted downstream sequence was:
+
+```text
+Reset
+Partial  segment 1 revision 1
+Final    segment 1 revision 2
+Final    segment 2 revision 1
+```
+
+The first stable Final was normalized from Committed. Its sequence, segment,
+revision, text, audio bounds, and timestamps were retained, and the matching
+native Final was deduplicated. No revision was renumbered or fabricated.
+
+Real acceptance exposed and corrected eight defects:
+
+1. Silero tensor metadata views outlived temporary owning `Ort::TypeInfo`
+   objects. Three owning TypeInfo values now remain alive throughout metadata
+   validation; the pinned model interface did not change.
+2. Whisper language `auto` incorrectly set `detect_language=true`. It now uses
+   a null language while normal transcription continues; explicit languages
+   are unchanged.
+3. WPF startup combined `StartupUri` with explicit startup ownership.
+   `App.OnStartup` now creates and shows exactly one `MainWindow`.
+4. `LocalAsrCaptionSource` suppressed accepted Partial revision 1. Accepted
+   Partials are now forwarded, while stable normalization and matching-Final
+   deduplication remain as described above.
+5. Unexpected pipeline completion did not propagate to the source.
+   `AudioWorkerPipeline` now exposes a per-session Completion boundary, which
+   `LocalAsrCaptionSource` observes to fault, reject stale events, and own
+   cleanup.
+6. Faulted or Unavailable same-source selection was treated as idempotent.
+   Explicit retry now replaces the failed source; Running same-source
+   selection remains idempotent.
+7. The Settings ComboBox could not reselect an unchanged failed value. A
+   `Retry selected source` action is visible only for Faulted or Unavailable
+   state and uses the normal settings session and Coordinator.
+8. Acceptance UI state was read from a non-Dispatcher thread. WPF page/control
+   discovery and property access now execute on the real Dispatcher.
+
+Pipeline Completion is the terminal boundary for each real session. Normal
+Stop completion is not an unexpected fault. Unexpected worker or pipeline
+completion becomes source Faulted, invalidates stale and post-stop delivery,
+and joins capture, pump, pipe, worker, source, and Host cleanup. Explicit retry
+creates a fresh source, worker session, and capture session. It does not
+automatically restart or fall back, and persisted LocalAsr remains unchanged
+after runtime failure.
+
+Stage 6.5 trace and UI-driving code is acceptance-only instrumentation. It is
+dormant during normal use and activates only when explicit absolute action-plan
+and evidence paths are supplied through both required environment variables.
+It runs inside the real WPF application on the real Dispatcher and invokes the
+actual controls. It cannot inject captions, bypass the Coordinator, start the
+pipeline directly, set LogOnly directly, write SQLite rows directly, or modify
+recognition, timing, buffering, fallback, or shutdown behavior. It writes only
+passive JSONL evidence to the explicitly supplied sandbox path and is not a
+supported user feature or general-purpose automation API.
+
+Stage 6.5 changed no IPC field, protocol version, recognition threshold,
+timeout, bounded-buffer capacity, automatic-fallback rule, dependency, or
+runtime/model contract.
 
 ## Caption event lifecycle
 

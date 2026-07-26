@@ -80,6 +80,13 @@ namespace LiveCaptionsTranslator.utils
                 command.Parameters.AddWithValue("@TargetLanguage", targetLanguage);
                 command.Parameters.AddWithValue("@ApiUsed", apiUsed);
                 await command.ExecuteNonQueryAsync(token);
+                Stage65AcceptanceTrace.Write("history.row.written", new
+                {
+                    SourceText = sourceText,
+                    TranslatedText = translatedText,
+                    TargetLanguage = targetLanguage,
+                    ApiUsed = apiUsed
+                });
             }
         }
 

@@ -357,6 +357,15 @@
                         AutomationProperties.Name="Caption source"
                         DisplayMemberPath="DisplayName"
                         SelectionChanged="CaptionSourceBox_SelectionChanged" />
+                    <ui:Button
+                        x:Name="RetryCaptionSourceButton"
+                        Width="220"
+                        Height="26"
+                        Margin="0,5,0,0"
+                        AutomationProperties.Name="Retry selected caption source"
+                        Click="RetryCaptionSourceButton_Click"
+                        Content="Retry selected source"
+                        Visibility="Collapsed" />
                     <ProgressBar
                         x:Name="CaptionSourceProgress"
                         Width="220"

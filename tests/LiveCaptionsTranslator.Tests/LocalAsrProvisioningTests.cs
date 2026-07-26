@@ -584,7 +584,12 @@ public sealed class LocalAsrProvisioningTests : IDisposable
 
     private sealed class SuccessfulLocalPipeline : ILocalAsrPipeline
     {
+        private readonly TaskCompletionSource completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
         public Guid? SessionId { get; private set; }
+        public Task Completion => completion.Task;
+        public string? FailureReason => null;
         public event EventHandler<CaptionEvent>? CaptionEventReceived;
 
         public Task StartAsync(CancellationToken cancellationToken)
@@ -597,6 +602,7 @@ public sealed class LocalAsrProvisioningTests : IDisposable
         public Task StopAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            completion.TrySetResult();
             return Task.CompletedTask;
         }
 

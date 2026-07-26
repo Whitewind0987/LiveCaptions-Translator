@@ -107,16 +107,33 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
+            await SelectCaptionSourceAsync(selected.Kind);
+        }
+
+        private async void RetryCaptionSourceButton_Click(
+            object sender,
+            RoutedEventArgs e)
+        {
+            if (CaptionSourceBox.SelectedItem is CaptionSourceOption selected)
+                await SelectCaptionSourceAsync(selected.Kind);
+        }
+
+        private async Task SelectCaptionSourceAsync(CaptionSourceKind kind)
+        {
+            if (selectingCaptionSource || captionSourceSession == null)
+                return;
+
             var sourceSession = captionSourceSession;
             selectingCaptionSource = true;
             CaptionSourceBox.IsEnabled = false;
+            RetryCaptionSourceButton.IsEnabled = false;
             CaptionSourceProgress.Visibility = Visibility.Visible;
             CaptionSourceBusyText.Visibility = Visibility.Visible;
             RefreshLocalAsrProvisioningButton.IsEnabled = false;
             captionSourceTransientFailure = null;
             try
             {
-                await sourceSession.SelectAsync(selected.Kind);
+                await sourceSession.SelectAsync(kind);
             }
             catch (OperationCanceledException)
             {
@@ -208,6 +225,12 @@ namespace LiveCaptionsTranslator
                 CaptionSourceBox.SelectedItem = CaptionSourceOptions.First(option =>
                     option.Kind == status.PersistedSource);
                 CaptionSourceBox.IsEnabled = !selectionBusy;
+                RetryCaptionSourceButton.IsEnabled = !selectionBusy;
+                RetryCaptionSourceButton.Visibility =
+                    !selectionBusy && status.SourceState is CaptionSourceState.Faulted or
+                        CaptionSourceState.Unavailable
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
                 CaptionSourceProgress.Visibility = selectionBusy
                     ? Visibility.Visible
                     : Visibility.Collapsed;

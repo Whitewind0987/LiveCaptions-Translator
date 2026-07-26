@@ -7,7 +7,7 @@ namespace LiveCaptionsTranslator.Tests;
 public sealed class LocalAsrCaptionSourceTests
 {
     [Fact]
-    public async Task ResetIsForwardedExactlyOnceAndPartialIsSuppressed()
+    public async Task ResetAndAcceptedPartialAreForwardedExactlyOnce()
     {
         var pipeline = new FakePipeline();
         await using var source = CreateSource(pipeline);
@@ -19,7 +19,11 @@ public sealed class LocalAsrCaptionSourceTests
         pipeline.Emit(reset);
         pipeline.Emit(Text(CaptionEventKind.Partial, 2, text: "draft"));
 
-        Assert.Same(reset, Assert.Single(received));
+        Assert.Equal([CaptionEventKind.Reset, CaptionEventKind.Partial],
+            received.Select(value => value.Kind));
+        Assert.Same(reset, received[0]);
+        Assert.Equal(1, received[1].Revision);
+        Assert.Equal("draft", received[1].Text);
     }
 
     [Fact]
@@ -58,7 +62,7 @@ public sealed class LocalAsrCaptionSourceTests
     }
 
     [Fact]
-    public async Task CaptionSourceHostAcceptsForwardedResetThenStableCaption()
+    public async Task CaptionSourceHostAcceptsPartialThenStableRevision()
     {
         var pipeline = new FakePipeline();
         var source = CreateSource(pipeline);
@@ -66,13 +70,43 @@ public sealed class LocalAsrCaptionSourceTests
 
         var result = await host.StartAsync(TestContext.Current.CancellationToken);
         pipeline.Emit(Reset());
-        pipeline.Emit(Text(CaptionEventKind.Committed, 2, text: "stable"));
+        pipeline.Emit(Text(CaptionEventKind.Partial, 2, revision: 1, text: "draft"));
+        pipeline.Emit(Text(CaptionEventKind.Committed, 3, revision: 2, text: "stable"));
 
         Assert.True(result.Success);
         Assert.Equal(CaptionEventFactory.SessionA, host.ActiveSessionId);
-        Assert.Equal(2, host.LastAcceptedSequence);
+        Assert.Equal(3, host.LastAcceptedSequence);
         Assert.Equal(1, host.CurrentSegmentId);
+        Assert.Equal(2, host.CurrentRevision);
         Assert.Equal("stable", host.LatestSnapshot?.Text);
+        Assert.Equal(2, host.LatestSnapshot?.Revision);
+        Assert.Null(host.LastGateRejectionReason);
+    }
+
+    [Fact]
+    public async Task CaptionSourceHostAcceptsTwoSegmentsBeginningAtRevisionOne()
+    {
+        var pipeline = new FakePipeline();
+        var source = CreateSource(pipeline);
+        await using var host = new CaptionSourceHost(source);
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        pipeline.Emit(Reset());
+        pipeline.Emit(Text(CaptionEventKind.Partial, 2,
+            segment: 1, revision: 1, text: "one draft"));
+        pipeline.Emit(Text(CaptionEventKind.Committed, 3,
+            segment: 1, revision: 2, text: "one stable"));
+        pipeline.Emit(Text(CaptionEventKind.Final, 4,
+            segment: 1, revision: 2, text: "one stable"));
+        pipeline.Emit(Text(CaptionEventKind.Partial, 5,
+            segment: 2, revision: 1, text: "two draft"));
+        pipeline.Emit(Text(CaptionEventKind.Committed, 6,
+            segment: 2, revision: 2, text: "two stable"));
+
+        Assert.Equal(2, host.CurrentSegmentId);
+        Assert.Equal(2, host.CurrentRevision);
+        Assert.Equal(6, host.LastAcceptedSequence);
+        Assert.Equal("two stable", host.LatestSnapshot?.Text);
         Assert.Null(host.LastGateRejectionReason);
     }
 
@@ -168,12 +202,17 @@ public sealed class LocalAsrCaptionSourceTests
         await source.StartAsync(TestContext.Current.CancellationToken);
         pipeline.Emit(Reset());
 
-        pipeline.Emit(Text(CaptionEventKind.Committed, 2, text: "stable"));
-        pipeline.Emit(Text(CaptionEventKind.Final, 3, text: "stable"));
+        pipeline.Emit(Text(CaptionEventKind.Partial, 2,
+            revision: 1, text: "draft"));
+        pipeline.Emit(Text(CaptionEventKind.Committed, 3,
+            revision: 2, text: "stable"));
+        pipeline.Emit(Text(CaptionEventKind.Final, 4,
+            revision: 2, text: "stable"));
 
         Assert.Equal(
-            [CaptionEventKind.Reset, CaptionEventKind.Final],
+            [CaptionEventKind.Reset, CaptionEventKind.Partial, CaptionEventKind.Final],
             received.Select(value => value.Kind));
+        Assert.Single(received, value => value.Kind == CaptionEventKind.Final);
     }
 
     [Fact]
@@ -209,9 +248,11 @@ public sealed class LocalAsrCaptionSourceTests
         pipeline.Emit(Text(CaptionEventKind.Committed, 4, revision: 1, text: "one"));
         pipeline.Emit(Text(CaptionEventKind.Committed, 5, revision: 2, text: "two"));
 
-        var caption = Assert.Single(received, value => value.Kind != CaptionEventKind.Reset);
+        var caption = Assert.Single(received, value => value.Kind == CaptionEventKind.Final);
         Assert.Equal(2, caption.Revision);
         Assert.Equal("two", caption.Text);
+        Assert.DoesNotContain(received,
+            value => value.Kind == CaptionEventKind.Final && value.Revision == 1);
     }
 
     [Fact]
@@ -309,6 +350,7 @@ public sealed class LocalAsrCaptionSourceTests
         var staleHandler = pipeline.CurrentHandler;
 
         await source.StopAsync(TestContext.Current.CancellationToken);
+        pipeline.Emit(Text(CaptionEventKind.Partial, 2, text: "late partial"));
         staleHandler?.Invoke(pipeline, Text(CaptionEventKind.Committed, 2));
 
         Assert.Equal(1, count);
@@ -387,6 +429,39 @@ public sealed class LocalAsrCaptionSourceTests
         Assert.Equal(1, failed.DisposeCount);
         Assert.True(second.Success);
         Assert.Equal(CaptionEventFactory.SessionB, second.SessionId);
+    }
+
+    [Fact]
+    public async Task UnexpectedPipelineCompletionFaultsSourceDrainsRunAndAllowsRestart()
+    {
+        var pipeline = new FakePipeline { FailureReason = "Control pipe closed." };
+        var replacement = new FakePipeline { SessionId = CaptionEventFactory.SessionB };
+        var pipelines = new Queue<ILocalAsrPipeline>([pipeline, replacement]);
+        await using var source = new LocalAsrCaptionSource(() => pipelines.Dequeue());
+        var faulted = new TaskCompletionSource<CaptionSourceStatus>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        source.StatusChanged += (_, status) =>
+        {
+            if (status.State == CaptionSourceState.Faulted)
+                faulted.TrySetResult(status);
+        };
+        await source.StartAsync(TestContext.Current.CancellationToken);
+        pipeline.Emit(Reset());
+        var oldHandler = pipeline.CurrentHandler;
+
+        pipeline.CompletionSignal.TrySetResult();
+        var status = await faulted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var restarted = await source.StartAsync(TestContext.Current.CancellationToken);
+        oldHandler?.Invoke(pipeline, Text(CaptionEventKind.Partial, 2));
+
+        Assert.Contains("Control pipe closed", status.FailureReason);
+        Assert.Equal(0, pipeline.StopCount);
+        Assert.Equal(1, pipeline.DisposeCount);
+        Assert.Equal(1, pipeline.SubscriptionRemoves);
+        Assert.True(restarted.Success);
+        Assert.Equal(CaptionEventFactory.SessionB, restarted.SessionId);
+        Assert.Equal(CaptionSourceState.Running, source.State);
     }
 
     [Fact]
@@ -737,6 +812,8 @@ public sealed class LocalAsrCaptionSourceTests
         internal TaskCompletionSource StopEntered { get; } = NewSignal();
         internal TaskCompletionSource? StartGate { get; set; }
         internal TaskCompletionSource? StopGate { get; set; }
+        internal TaskCompletionSource CompletionSignal { get; } = NewSignal();
+        internal string? FailureReason { get; set; }
         internal Exception? StartFailure { get; set; }
         internal Action? OnStop { get; set; }
         internal int StartCount { get; private set; }
@@ -747,6 +824,8 @@ public sealed class LocalAsrCaptionSourceTests
         internal EventHandler<CaptionEvent>? CurrentHandler => captionEventReceived;
 
         Guid? ILocalAsrPipeline.SessionId => SessionId;
+        Task ILocalAsrPipeline.Completion => CompletionSignal.Task;
+        string? ILocalAsrPipeline.FailureReason => FailureReason;
 
         public event EventHandler<CaptionEvent>? CaptionEventReceived
         {
@@ -778,6 +857,7 @@ public sealed class LocalAsrCaptionSourceTests
             OnStop?.Invoke();
             if (StopGate != null)
                 await StopGate.Task.WaitAsync(cancellationToken);
+            CompletionSignal.TrySetResult();
         }
 
         public ValueTask DisposeAsync()

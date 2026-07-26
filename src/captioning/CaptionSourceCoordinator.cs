@@ -126,7 +126,9 @@ namespace LiveCaptionsTranslator.captioning
                         pendingStop = stopTask;
                         if (pendingStop == null &&
                             currentOwner is { ForwardingEnabled: true } owner &&
-                            owner.Kind == kind)
+                            owner.Kind == kind &&
+                            state is not CaptionSourceState.Faulted and
+                                not CaptionSourceState.Unavailable)
                         {
                             return owner.StartResult!;
                         }
